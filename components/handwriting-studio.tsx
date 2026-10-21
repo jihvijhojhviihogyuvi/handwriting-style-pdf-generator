@@ -91,11 +91,12 @@ export function HandwritingStudio() {
   const [handStyle, setHandStyle] = useState<HandStyleId>('everyday-ballpoint')
   const [inkColor, setInkColor] = useState<InkColorId>('bic-blue')
   const [paperStyle, setPaperStyle] = useState<PaperStyleId>('natural-bond')
-  const [fontSizePx, setFontSizePx] = useState<number>(48)
-  const [diagonalDriftIntensity, setDiagonalDriftIntensity] = useState<number>(1.25)
-  const [unevenHeightIntensity, setUnevenHeightIntensity] = useState<number>(1.3)
+  const [fontSizePx, setFontSizePx] = useState<number>(42)
+  const [nibFineness, setNibFineness] = useState<number>(1.05)
+  const [diagonalDriftIntensity, setDiagonalDriftIntensity] = useState<number>(1.15)
+  const [unevenHeightIntensity, setUnevenHeightIntensity] = useState<number>(1.2)
   const [mistakeFrequency, setMistakeFrequency] = useState<number>(0.08)
-  const [marginWanderIntensity, setMarginWanderIntensity] = useState<number>(1.15)
+  const [marginWanderIntensity, setMarginWanderIntensity] = useState<number>(1.1)
   const [seed, setSeed] = useState<number>(48291)
   const [showForensicGuides, setShowForensicGuides] = useState<boolean>(false)
 
@@ -139,20 +140,14 @@ export function HandwritingStudio() {
       if (typeof document !== 'undefined' && document.fonts) {
         try {
           await Promise.allSettled([
-            document.fonts.load('400 48px "Caveat"'),
-            document.fonts.load('500 48px "Caveat"'),
-            document.fonts.load('600 48px "Caveat"'),
-            document.fonts.load('400 48px "Kalam"'),
-            document.fonts.load('300 48px "Kalam"'),
-            document.fonts.load('400 48px "Shadows Into Light Two"'),
-            document.fonts.load('400 48px "Nothing You Could Do"'),
-            document.fonts.load('400 48px "Reenie Beanie"'),
-            document.fonts.load('400 48px "Nanum Pen Script"'),
-            document.fonts.load('400 48px "Patrick Hand"'),
-            document.fonts.load('400 48px "Zeyada"'),
-            document.fonts.load('400 48px "La Belle Aurore"'),
-            document.fonts.load('400 48px "Handlee"'),
-            document.fonts.load('400 48px "Indie Flower"'),
+            document.fonts.load('400 42px "Caveat"'),
+            document.fonts.load('400 42px "Nanum Pen Script"'),
+            document.fonts.load('400 42px "Shadows Into Light Two"'),
+            document.fonts.load('300 42px "Kalam"'),
+            document.fonts.load('400 42px "Kalam"'),
+            document.fonts.load('400 42px "Nothing You Could Do"'),
+            document.fonts.load('400 42px "Reenie Beanie"'),
+            document.fonts.load('400 42px "La Belle Aurore"'),
           ])
           await document.fonts.ready
         } catch {
@@ -180,6 +175,7 @@ export function HandwritingStudio() {
       inkColor,
       paperStyle,
       fontSizePx,
+      nibFineness,
       diagonalDriftIntensity,
       unevenHeightIntensity,
       mistakeFrequency,
@@ -233,6 +229,7 @@ export function HandwritingStudio() {
     inkColor,
     paperStyle,
     fontSizePx,
+    nibFineness,
     diagonalDriftIntensity,
     unevenHeightIntensity,
     mistakeFrequency,
@@ -619,8 +616,27 @@ export function HandwritingStudio() {
                 </p>
               </div>
 
-              {/* Left/Right Margin Wander & Size */}
-              <div className="grid grid-cols-2 gap-3">
+              {/* Left/Right Margin Wander, Pen Nib Fineness & Size */}
+              <div className="grid grid-cols-3 gap-2.5">
+                <div>
+                  <div className="mb-1 flex items-center justify-between text-xs">
+                    <span className="text-muted-foreground">Nib Thinness</span>
+                    <span className="font-mono text-foreground">
+                      {Math.round(nibFineness * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={1.5}
+                    step={0.05}
+                    value={nibFineness}
+                    onChange={(e) => {
+                      setNibFineness(parseFloat(e.target.value))
+                    }}
+                    className="w-full accent-primary"
+                  />
+                </div>
                 <div>
                   <div className="mb-1 flex items-center justify-between text-xs">
                     <span className="text-muted-foreground">Margin Wander</span>
@@ -645,8 +661,8 @@ export function HandwritingStudio() {
                   </div>
                   <input
                     type="range"
-                    min={36}
-                    max={64}
+                    min={34}
+                    max={60}
                     step={2}
                     value={fontSizePx}
                     onChange={(e) => {

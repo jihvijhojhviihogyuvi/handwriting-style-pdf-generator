@@ -166,11 +166,11 @@ export function renderScratchOutOverlay(
 
   const [r, g, b] = palette.rgb
   const [pr, pg, pb] = palette.poolRgb
-  const midY = -xHeight * 0.42
-  const padLeft = -xHeight * 0.1
-  const padRight = width + xHeight * 0.16
+  const midY = -xHeight * 0.40
+  const padLeft = -xHeight * 0.08
+  const padRight = width + xHeight * 0.12
   const spanW = padRight - padLeft
-  const baseLineW = Math.max(1.8, xHeight * 0.095)
+  const baseLineW = Math.max(1.25, xHeight * 0.068)
 
   const drawOrganicSegment = (
     x0: number,

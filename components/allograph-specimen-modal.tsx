@@ -83,9 +83,8 @@ export function AllographSpecimenModal({
         )
 
         ctx.save()
-        const centerX = Math.round(W * 0.48 - glyph.advanceWidth * 0.45)
+        const centerX = Math.round(W * 0.5 - glyph.advanceWidth * 0.5)
         ctx.translate(centerX, baseLineY)
-        ctx.rotate(glyph.descriptor.rotationRad)
         ctx.drawImage(glyph.canvas, -glyph.anchorX, -glyph.baselineY)
         ctx.restore()
       }

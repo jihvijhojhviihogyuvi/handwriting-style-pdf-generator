@@ -6,8 +6,8 @@
  *    slope angle, quadratic bow/arch, and wrist pivot momentum)
  * 2. Word-level independent diagonal tilt & baseline vertical hop
  * 3. Character-level uneven heights, baseline jitter, and 20-allograph anti-repetition
- * 4. Smooth continuous line clearance guard (advances cursorY monotonically without mid-line cliffs)
- * 5. Natural intra-word ligature bridges & authentic crossed-out mistakes + caret superscripts
+ * 4. Natural non-overlapping inter-letter spacing with pair-aware cursive micro-ligatures
+ * 5. Optical multiply ink-to-paper blending & authentic crossed-out mistakes
  */
 
 import {
@@ -39,6 +39,7 @@ export interface CompositorConfig {
   inkColor: InkColorId
   paperStyle: PaperStyleId
   fontSizePx: number
+  nibFineness?: number // 0.6 .. 1.4
   diagonalDriftIntensity: number // 0.0 .. 2.0
   unevenHeightIntensity: number // 0.0 .. 2.0
   mistakeFrequency: number // 0.0 .. 0.25
@@ -70,6 +71,14 @@ interface WordToken {
   wordIndexInSentence: number
   isParagraphBreak?: boolean
 }
+
+const NATURAL_LIGATURE_BIGRAMS = new Set([
+  'th', 'he', 'in', 'er', 'an', 're', 'on', 'at', 'en', 'nd',
+  'ti', 'es', 'or', 'te', 'of', 'ed', 'is', 'it', 'al', 'ar',
+  'st', 'to', 'nt', 'ng', 'se', 'ha', 'as', 'ou', 'io', 'le',
+  've', 'co', 'me', 'de', 'hi', 'ri', 'ro', 'ic', 'ne', 'ea',
+  'ra', 'ce', 'li', 'ch', 'll', 'be', 'ma', 'si', 'om', 'ur',
+])
 
 function seededRand(seed: number): number {
   const x = Math.sin(seed * 12.9898 + 78.233) * 43758.5453
@@ -224,7 +233,7 @@ function drawPaperSurface(
   }
 
   if (paperStyle === 'legal-pad') {
-    ctx.fillStyle = '#fbf5d9'
+    ctx.fillStyle = '#fbf5d8'
   } else if (paperStyle === 'college-ruled') {
     ctx.fillStyle = '#fcfbf7'
   } else {
@@ -241,23 +250,23 @@ function drawPaperSurface(
     width * 0.85
   )
   grad.addColorStop(0, 'rgba(255, 255, 255, 0)')
-  grad.addColorStop(1, 'rgba(175, 160, 132, 0.12)')
+  grad.addColorStop(1, 'rgba(175, 160, 132, 0.10)')
   ctx.fillStyle = grad
   ctx.fillRect(0, 0, width, height)
 
-  ctx.lineWidth = 0.65
-  for (let i = 0; i < 420; i++) {
+  ctx.lineWidth = 0.6
+  for (let i = 0; i < 380; i++) {
     const r1 = seededRand(seed + pageIndex * 1000 + i * 3)
     const r2 = seededRand(seed + pageIndex * 1000 + i * 3 + 1)
     const r3 = seededRand(seed + pageIndex * 1000 + i * 3 + 2)
     const fx = r1 * width
     const fy = r2 * height
-    const len = 3 + r3 * 9
+    const len = 3 + r3 * 8
     const ang = r1 * Math.PI * 2
     ctx.strokeStyle =
       i % 2 === 0
-        ? 'rgba(140, 128, 108, 0.045)'
-        : 'rgba(255, 255, 255, 0.06)'
+        ? 'rgba(140, 128, 108, 0.04)'
+        : 'rgba(255, 255, 255, 0.05)'
     ctx.beginPath()
     ctx.moveTo(fx, fy)
     ctx.lineTo(fx + Math.cos(ang) * len, fy + Math.sin(ang) * len)
@@ -269,9 +278,9 @@ function drawPaperSurface(
     const lineSpacing = height * 0.031
     ctx.strokeStyle =
       paperStyle === 'legal-pad'
-        ? 'rgba(135, 175, 210, 0.42)'
-        : 'rgba(145, 182, 228, 0.38)'
-    ctx.lineWidth = 1.2
+        ? 'rgba(135, 175, 210, 0.40)'
+        : 'rgba(145, 182, 228, 0.36)'
+    ctx.lineWidth = 1.15
 
     for (let y = topMargin; y < height - height * 0.05; y += lineSpacing) {
       ctx.beginPath()
@@ -281,8 +290,8 @@ function drawPaperSurface(
     }
 
     const marginX = width * 0.105
-    ctx.strokeStyle = 'rgba(218, 108, 108, 0.42)'
-    ctx.lineWidth = 1.5
+    ctx.strokeStyle = 'rgba(218, 108, 108, 0.40)'
+    ctx.lineWidth = 1.4
     ctx.beginPath()
     ctx.moveTo(marginX, 0)
     ctx.lineTo(marginX, height)
@@ -332,12 +341,12 @@ export function renderHandwrittenDocument(
 
     const dir = sIdx % 3 === 0 ? -1 : sIdx % 3 === 1 ? 1 : r1 > 0.48 ? 1 : -1
     const baseAngleDeg =
-      dir * (0.85 + r1 * 2.95) * config.diagonalDriftIntensity +
-      (r2 - 0.5) * 1.4 * config.diagonalDriftIntensity
+      dir * (0.75 + r1 * 2.55) * config.diagonalDriftIntensity +
+      (r2 - 0.5) * 1.2 * config.diagonalDriftIntensity
     const slopeRad = (baseAngleDeg * Math.PI) / 180
     const quadArchFactor =
-      (r2 - 0.46) * 0.00018 * config.diagonalDriftIntensity
-    const wordStepBiasY = (r3 - 0.48) * 2.2 * config.diagonalDriftIntensity
+      (r2 - 0.46) * 0.00014 * config.diagonalDriftIntensity
+    const wordStepBiasY = (r3 - 0.48) * 1.8 * config.diagonalDriftIntensity
 
     const kin = {
       slopeRad,
@@ -361,9 +370,9 @@ export function renderHandwrittenDocument(
       pageCanvas.width = pageWidth
       pageCanvas.height = pageHeight
     }
-    const ctx = pageCanvas.getContext('2d')!
+    const pCtx = pageCanvas.getContext('2d')!
     drawPaperSurface(
-      ctx,
+      pCtx,
       pageWidth,
       pageHeight,
       config.paperStyle,
@@ -379,12 +388,12 @@ export function renderHandwrittenDocument(
 
   const baseLeftMargin =
     config.paperStyle === 'college-ruled' || config.paperStyle === 'legal-pad'
-      ? pageWidth * 0.12
-      : pageWidth * 0.082
-  const baseRightMargin = pageWidth * 0.925
+      ? pageWidth * 0.122
+      : pageWidth * 0.085
+  const baseRightMargin = pageWidth * 0.922
   const topStart = pageHeight * 0.095
   const bottomLimit = pageHeight * 0.92
-  const baseLineSpacing = config.fontSizePx * 1.65
+  const baseLineSpacing = config.fontSizePx * 1.72
 
   let lineNumberOnPage = 0
   let cursorY = topStart
@@ -398,24 +407,24 @@ export function renderHandwrittenDocument(
       config.seed + currentPageIdx * 500 + lineNum * 73
     )
 
-    const fatigueDrift = lineNum * 1.15 * config.marginWanderIntensity
+    const fatigueDrift = lineNum * 1.05 * config.marginWanderIntensity
     const waveLeft =
       Math.sin(lineNum * 0.55 + config.seed) *
-        20 *
+        18 *
         config.marginWanderIntensity +
-      (r1 - 0.45) * 24 * config.marginWanderIntensity
+      (r1 - 0.45) * 22 * config.marginWanderIntensity
     const waveRight =
       Math.cos(lineNum * 0.48 + config.seed * 0.5) *
-        30 *
+        28 *
         config.marginWanderIntensity +
-      (r2 - 0.5) * 38 * config.marginWanderIntensity
+      (r2 - 0.5) * 34 * config.marginWanderIntensity
 
     return {
       left: Math.max(
-        pageWidth * 0.045,
+        pageWidth * 0.05,
         baseLeftMargin + fatigueDrift + waveLeft
       ),
-      right: Math.min(pageWidth * 0.96, baseRightMargin + waveRight),
+      right: Math.min(pageWidth * 0.955, baseRightMargin + waveRight),
     }
   }
 
@@ -438,7 +447,7 @@ export function renderHandwrittenDocument(
     const gapJitter =
       (rGap - 0.45) *
       config.fontSizePx *
-      0.32 *
+      0.28 *
       (0.5 + config.diagonalDriftIntensity * 0.5)
 
     let minAllowedY = cursorY + baseLineSpacing * extraGapMultiplier + gapJitter
@@ -452,7 +461,7 @@ export function renderHandwrittenDocument(
       if (maxPrevLineY > 0) {
         minAllowedY = Math.max(
           minAllowedY,
-          maxPrevLineY + config.fontSizePx * 1.14
+          maxPrevLineY + config.fontSizePx * 1.18
         )
       }
     }
@@ -466,7 +475,7 @@ export function renderHandwrittenDocument(
       lineNumberOnPage = 0
       cursorY =
         topStart +
-        (seededRand(config.seed + currentPageIdx * 17) - 0.5) * 18
+        (seededRand(config.seed + currentPageIdx * 17) - 0.5) * 16
       prevLineActualYProfile = null
     }
 
@@ -494,10 +503,10 @@ export function renderHandwrittenDocument(
     const sKin = getSentenceKinematics(sentenceIdx)
 
     const wordSlopeDeltaDeg =
-      ((rw1 - 0.48) * 5.4 + Math.sin(wordSalt * 1.7) * 2.2) *
+      ((rw1 - 0.48) * 4.8 + Math.sin(wordSalt * 1.7) * 1.9) *
       config.diagonalDriftIntensity
     const totalWordAngleDeg =
-      (sKin.slopeRad * 180) / Math.PI * 0.45 + wordSlopeDeltaDeg
+      ((sKin.slopeRad * 180) / Math.PI) * 0.42 + wordSlopeDeltaDeg
     const wordTiltRad = (totalWordAngleDeg * Math.PI) / 180
 
     if (wordSlopesSampleDeg.length < 32 && scaleMultiplier === 1.0) {
@@ -505,12 +514,12 @@ export function renderHandwrittenDocument(
     }
 
     const wordBaselineHop =
-      (rw2 - 0.48) * 5.8 * config.diagonalDriftIntensity
+      (rw2 - 0.48) * 4.8 * config.diagonalDriftIntensity
     const effectiveFontSize = Math.round(config.fontSizePx * scaleMultiplier)
 
     let localX = 0
     const chars = Array.from(wordStr)
-    const [inkR, inkG, inkB] = palette.rgb
+    const [inkR, inkG, inkB] = palette.lightRgb
     let prevCharExitX: number | null = null
     let prevCharExitY: number | null = null
 
@@ -524,7 +533,8 @@ export function renderHandwrittenDocument(
         variantIdx,
         config.handStyle,
         config.inkColor,
-        effectiveFontSize
+        effectiveFontSize,
+        config.nibFineness ?? 1.0
       )
 
       const rc1 = seededRand(config.seed + wordSalt * 31 + cIdx * 17)
@@ -532,9 +542,9 @@ export function renderHandwrittenDocument(
 
       const extraScaleY =
         1.0 +
-        (rc1 - 0.48) * 0.24 * config.unevenHeightIntensity +
+        (rc1 - 0.48) * 0.21 * config.unevenHeightIntensity +
         (glyph.descriptor.aspectScaleY - 1.0) *
-          0.35 *
+          0.32 *
           (config.unevenHeightIntensity - 1.0)
 
       const totalHeightRatio = glyph.descriptor.aspectScaleY * extraScaleY
@@ -543,8 +553,8 @@ export function renderHandwrittenDocument(
 
       const charBounceY =
         glyph.descriptor.baselineShiftPx *
-          (0.65 + config.unevenHeightIntensity * 0.45) +
-        (rc2 - 0.5) * 2.8 * config.unevenHeightIntensity
+          (0.60 + config.unevenHeightIntensity * 0.40) +
+        (rc2 - 0.5) * 2.4 * config.unevenHeightIntensity
 
       const wordInternalDy = Math.tan(wordTiltRad) * localX
 
@@ -557,44 +567,57 @@ export function renderHandwrittenDocument(
         )
       )
 
-      ctx.save()
-      ctx.translate(gx, gy)
-      ctx.rotate(glyph.descriptor.rotationRad)
-      ctx.scale(1.0, extraScaleY)
-      ctx.drawImage(glyph.canvas, -glyph.anchorX, -glyph.baselineY)
-      ctx.restore()
-
-      if (
+      // Determine whether this character pair forms a natural cursive ligature bridge
+      const bigram =
+        cIdx > 0 ? `${chars[cIdx - 1]}${ch}`.toLowerCase() : ''
+      const isNaturalLigaturePair =
         cIdx > 0 &&
-        prevCharExitX !== null &&
-        prevCharExitY !== null &&
+        NATURAL_LIGATURE_BIGRAMS.has(bigram) &&
         ch >= 'a' &&
         ch <= 'z' &&
         chars[cIdx - 1] >= 'a' &&
         chars[cIdx - 1] <= 'z' &&
         rc1 < style.ligatureRate
+
+      ctx.save()
+      if (config.paperStyle !== 'ink-only-white') {
+        ctx.globalCompositeOperation = 'multiply'
+      }
+      ctx.translate(gx, gy)
+      ctx.scale(1.0, extraScaleY)
+      ctx.drawImage(glyph.canvas, -glyph.anchorX, -glyph.baselineY)
+      ctx.restore()
+
+      // Delicate, thin upstroke ligature connection only on natural cursive pairs
+      if (
+        isNaturalLigaturePair &&
+        prevCharExitX !== null &&
+        prevCharExitY !== null
       ) {
-        const entryX = gx + 2
-        const entryY = gy - effectiveFontSize * (0.14 + rc2 * 0.08)
-        if (entryX > prevCharExitX - 4 && entryX - prevCharExitX < 18) {
+        const entryX = gx + 1.5
+        const entryY = gy - effectiveFontSize * (0.13 + rc2 * 0.06)
+        if (entryX > prevCharExitX && entryX - prevCharExitX < 14) {
           ctx.save()
+          if (config.paperStyle !== 'ink-only-white') {
+            ctx.globalCompositeOperation = 'multiply'
+          }
           ctx.beginPath()
           ctx.moveTo(prevCharExitX, prevCharExitY)
           const midX = (prevCharExitX + entryX) * 0.5
-          const midY = Math.max(prevCharExitY, entryY) + 1.4
+          const midY = Math.max(prevCharExitY, entryY) + 1.1
           ctx.quadraticCurveTo(midX, midY, entryX, entryY)
           ctx.strokeStyle = `rgba(${inkR}, ${inkG}, ${inkB}, ${(
-            palette.wetAlpha * 0.52
+            palette.wetAlpha * 0.36
           ).toFixed(3)})`
-          ctx.lineWidth = Math.max(1.2, effectiveFontSize * 0.036)
+          ctx.lineWidth = Math.max(0.9, effectiveFontSize * 0.024)
           ctx.lineCap = 'round'
           ctx.stroke()
           ctx.restore()
         }
       }
 
-      prevCharExitX = gx + glyph.advanceWidth * 0.88
-      prevCharExitY = gy - effectiveFontSize * (0.12 + rc1 * 0.1)
+      prevCharExitX = gx + glyph.advanceWidth - 0.5
+      prevCharExitY = gy - effectiveFontSize * (0.11 + rc1 * 0.08)
 
       if (config.showForensicGuides) {
         ctx.save()
@@ -608,11 +631,24 @@ export function renderHandwrittenDocument(
         ctx.restore()
       }
 
-      const kernJitter = (rc1 - 0.52) * (effectiveFontSize * 0.04)
-      localX += Math.max(
-        effectiveFontSize * 0.15,
-        glyph.advanceWidth * 0.90 + kernJitter
-      )
+      // Positive, optical non-overlapping inter-letter spacing:
+      // Each letter advances by its optical x-height body span PLUS a tight, natural
+      // intra-word clearance so letters neither collide nor split inside a word
+      const nextChar = chars[cIdx + 1] || ''
+      const nextBigram = `${ch}${nextChar}`.toLowerCase()
+      const nextWillConnect =
+        NATURAL_LIGATURE_BIGRAMS.has(nextBigram) &&
+        rc2 < style.ligatureRate
+      const isUpper = ch >= 'A' && ch <= 'Z'
+
+      const baseBreathingGap = nextWillConnect
+        ? effectiveFontSize * (0.006 + rc1 * 0.018)
+        : effectiveFontSize *
+          (style.letterGapRatio +
+            (rc1 - 0.42) * 0.028 +
+            (isUpper ? 0.022 : 0))
+
+      localX += glyph.advanceWidth + Math.max(0.6, baseBreathingGap)
       totalGlyphsCount++
     }
 
@@ -639,7 +675,7 @@ export function renderHandwrittenDocument(
   }
 
   const estimateWordWidth = (wordStr: string) =>
-    wordStr.length * config.fontSizePx * 0.38
+    wordStr.length * config.fontSizePx * 0.44
 
   let currentLineYProfile = new Float32Array(pageWidth)
 
@@ -655,13 +691,8 @@ export function renderHandwrittenDocument(
 
     const sKin = getSentenceKinematics(token.sentenceIndex)
 
-    /**
-     * Computes the active baseline Y at `atX` using continuous incremental drift
-     * so starting a new sentence mid-line transitions its slope angle smoothly
-     * from the hand's current vertical position without any mid-line cliff!
-     */
     const calcActiveY = (atX: number) => {
-      const clampedDrift = Math.max(-28, Math.min(32, currentLineDriftY))
+      const clampedDrift = Math.max(-26, Math.min(30, currentLineDriftY))
       let yVal = cursorY + clampedDrift
 
       if (prevLineActualYProfile !== null) {
@@ -670,7 +701,7 @@ export function renderHandwrittenDocument(
           Math.min(pageWidth - 1, Math.floor(atX))
         )
         const prevY = prevLineActualYProfile[colIdx]
-        const minGap = config.fontSizePx * 1.15
+        const minGap = config.fontSizePx * 1.18
         if (prevY > 0 && yVal - prevY < minGap) {
           const pushDown = prevY + minGap - yVal
           cursorY += pushDown
@@ -682,14 +713,14 @@ export function renderHandwrittenDocument(
     }
 
     const advanceSentenceDrift = (stepDx: number) => {
-      const slopeStep = Math.tan(sKin.slopeRad) * stepDx * 0.62
+      const slopeStep = Math.tan(sKin.slopeRad) * stepDx * 0.60
       const archStep =
         sKin.quadArchFactor * stepDx * (cursorX - lineStartOriginX - 350)
       currentLineDriftY = Math.max(
-        -28,
+        -26,
         Math.min(
-          32,
-          currentLineDriftY + slopeStep + archStep + sKin.wordStepBiasY * 0.45
+          30,
+          currentLineDriftY + slopeStep + archStep + sKin.wordStepBiasY * 0.42
         )
       )
     }
@@ -730,7 +761,7 @@ export function renderHandwrittenDocument(
         cursorX,
         activeY,
         rendered.width,
-        config.fontSizePx * 0.48,
+        config.fontSizePx * 0.46,
         rendered.wordTiltRad,
         token.scratchStyle,
         palette,
@@ -745,7 +776,7 @@ export function renderHandwrittenDocument(
 
       const spaceGap =
         config.fontSizePx *
-        (0.42 + seededRand(config.seed + tIdx * 71) * 0.34)
+        (0.44 + seededRand(config.seed + tIdx * 71) * 0.34)
       const stepDx = rendered.width + spaceGap
       cursorX += stepDx
       advanceSentenceDrift(stepDx)
@@ -782,7 +813,7 @@ export function renderHandwrittenDocument(
         cursorX,
         mistakeY,
         mistakeRender.width,
-        config.fontSizePx * 0.48,
+        config.fontSizePx * 0.46,
         mistakeRender.wordTiltRad,
         token.scratchStyle,
         palette,
@@ -802,12 +833,12 @@ export function renderHandwrittenDocument(
           ctx,
           caretX,
           mistakeY + 4,
-          config.fontSizePx * 0.45,
+          config.fontSizePx * 0.44,
           palette,
           config.seed + tIdx * 199
         )
 
-        const superX = caretX - config.fontSizePx * 0.18
+        const superX = caretX - config.fontSizePx * 0.16
         const superY = Math.max(
           68,
           mistakeY - config.fontSizePx * 0.68
@@ -823,7 +854,7 @@ export function renderHandwrittenDocument(
 
         const afterSpace =
           config.fontSizePx *
-          (0.36 + seededRand(config.seed + tIdx * 83) * 0.24)
+          (0.38 + seededRand(config.seed + tIdx * 83) * 0.24)
         const nextCursorX = Math.max(
           cursorX + mistakeRender.width + config.fontSizePx * 0.55,
           superX + superRender.width + afterSpace
@@ -836,7 +867,7 @@ export function renderHandwrittenDocument(
       } else {
         const pauseGap =
           config.fontSizePx *
-          (0.40 + seededRand(config.seed + tIdx * 59) * 0.28)
+          (0.42 + seededRand(config.seed + tIdx * 59) * 0.28)
         const stepDx = mistakeRender.width + pauseGap
         cursorX += stepDx
         advanceSentenceDrift(stepDx)
@@ -875,7 +906,7 @@ export function renderHandwrittenDocument(
     const isClausePause = /[,;:—-]$/.test(token.raw)
     const baseWordSpace =
       config.fontSizePx *
-      (0.38 +
+      (0.42 +
         rSpace * 0.28 +
         (isSentenceEnd ? 0.28 : isClausePause ? 0.14 : 0))
 

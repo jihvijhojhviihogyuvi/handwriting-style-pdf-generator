@@ -37,7 +37,7 @@ export default function RootLayout({
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link
-          href="https://fonts.googleapis.com/css2?family=Architects+Daughter&family=Caveat:wght@400;500;600;700&family=Covered+By+Your+Grace&family=Gloria+Hallelujah&family=Handlee&family=Homemade+Apple&family=Indie+Flower&family=Kalam:wght@300;400;700&family=La+Belle+Aurore&family=Nanum+Pen+Script&family=Nothing+You+Could+Do&family=Patrick+Hand&family=Reenie+Beanie&family=Shadows+Into+Light+Two&family=Zeyada&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cedarville+Cursive&family=Dawning+of+a+New+Day&family=Give+You+Glory&family=Homemade+Apple&family=Indie+Flower&family=Kalam:wght@300;400&family=La+Belle+Aurore&family=Nanum+Pen+Script&family=Nothing+You+Could+Do&family=Over+the+Rainbow&family=Reenie+Beanie&family=Shadows+Into+Light+Two&family=Sue+Ellen+Francisco&family=Waiting+for+the+Sunrise&family=Zeyada&display=swap"
           rel="stylesheet"
         />
       </head>
