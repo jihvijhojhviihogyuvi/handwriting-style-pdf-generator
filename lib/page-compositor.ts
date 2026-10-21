@@ -1,20 +1,17 @@
 /**
- * Biomechanical Page Layout & Handwriting Compositor
+ * Multi-Page Biomechanical Handwriting Compositor
  *
- * Implements multi-scale human handwriting kinematics with full-line lookahead
- * trajectory clearance (so every sentence and word drifts diagonally across the page
- * by a different amount with zero mid-line step jumps and zero line-to-line collisions):
- *
- * 1. Sentence-level non-uniform diagonal trajectory (each sentence drifts at a distinct diagonal slope)
- * 2. Line-level diagonal slope, wrist-pivot curvature, wandering left/right margins, and uneven line spacing
- * 3. Word-level independent diagonal tilt, baseline vertical step, uneven word height scale, and irregular word gaps
- * 4. Character-level uneven height (scaleY), width (scaleX), baseline bounce, 20-allograph variant cycling,
- *    and natural inter-letter cursive ligature connections.
- * 5. Authentic crossed-out mistakes (false starts, phonetic slips, word restarts, and caret ^ superscripts).
+ * Orchestrates:
+ * 1. Sentence-level non-uniform diagonal baseline drift (every sentence gets its own
+ *    slope angle, quadratic bow/arch, and wrist pivot momentum)
+ * 2. Word-level independent diagonal tilt & baseline vertical hop
+ * 3. Character-level uneven heights, baseline jitter, and 20-allograph anti-repetition
+ * 4. Smooth continuous line clearance guard (advances cursorY monotonically without mid-line cliffs)
+ * 5. Natural intra-word ligature bridges & authentic crossed-out mistakes + caret superscripts
  */
 
 import {
-  AllographScheduler,
+  AllographSequenceSelector,
   getOrSynthesizeAllograph,
   HAND_STYLES,
   HandStyleId,
@@ -23,7 +20,6 @@ import {
 } from './allograph-engine'
 import {
   GeneratedMistake,
-  MistakeKind,
   pickScratchStyle,
   renderHandwrittenCaret,
   renderScratchOutOverlay,
@@ -32,11 +28,10 @@ import {
 } from './mistake-generator'
 
 export type PaperStyleId =
-  | 'ink-only-white'
   | 'natural-bond'
+  | 'ink-only-white'
   | 'college-ruled'
   | 'legal-pad'
-  | 'exam-booklet'
 
 export interface CompositorConfig {
   text: string
@@ -44,17 +39,12 @@ export interface CompositorConfig {
   inkColor: InkColorId
   paperStyle: PaperStyleId
   fontSizePx: number
-  diagonalDriftIntensity: number
-  unevenHeightIntensity: number
-  mistakeFrequency: number
-  marginWanderIntensity: number
+  diagonalDriftIntensity: number // 0.0 .. 2.0
+  unevenHeightIntensity: number // 0.0 .. 2.0
+  mistakeFrequency: number // 0.0 .. 0.25
+  marginWanderIntensity: number // 0.0 .. 2.0
   seed: number
-  showForensicGuides?: boolean
-}
-
-export interface RenderedMistakeRecord extends GeneratedMistake {
-  pageIndex: number
-  sentenceIndex: number
+  showForensicGuides: boolean
 }
 
 export interface CompositorTelemetry {
@@ -62,151 +52,166 @@ export interface CompositorTelemetry {
   totalWords: number
   totalGlyphs: number
   uniqueAllographsCount: number
-  mistakes: RenderedMistakeRecord[]
+  mistakes: GeneratedMistake[]
   sentenceSlopesDeg: number[]
   wordSlopesSampleDeg: number[]
   minCharHeightRatio: number
   maxCharHeightRatio: number
 }
 
-function pseudoRand(seed: number, salt: number): number {
-  const x = Math.sin(seed * 12.9898 + salt * 78.233) * 43758.5453
+interface WordToken {
+  raw: string
+  isExplicitMistake: boolean
+  isAutoMistake: boolean
+  mistakenText?: string
+  scratchStyle?: ScratchStyle
+  isCaretSuperscript?: boolean
+  sentenceIndex: number
+  wordIndexInSentence: number
+  isParagraphBreak?: boolean
+}
+
+function seededRand(seed: number): number {
+  const x = Math.sin(seed * 12.9898 + 78.233) * 43758.5453
   return x - Math.floor(x)
 }
 
-function signedRand(seed: number, salt: number): number {
-  return pseudoRand(seed, salt) * 2 - 1
-}
-
-interface WordToken {
-  rawText: string
-  sentenceIndex: number
-  globalIndex: number
-  isManualStrike: boolean
-  isParagraphBreak?: boolean
-  preMistake?: {
-    mistakenText: string
-    kind: MistakeKind
-    scratchStyle: ScratchStyle
-    isCaretSuperscript: boolean
-    id: string
-  }
-}
-
-function tokenizeWithMistakes(
+function tokenizeInputWithMistakes(
   text: string,
   mistakeFrequency: number,
   seed: number
-): WordToken[] {
+): { tokens: WordToken[]; mistakes: GeneratedMistake[] } {
   const paragraphs = text.replace(/\r\n/g, '\n').split('\n')
   const tokens: WordToken[] = []
-  let sentenceCounter = 0
-  let globalWordIdx = 0
-  let lastScratchStyle: ScratchStyle | undefined
-  let cooldown = 0
+  const mistakes: GeneratedMistake[] = []
+
+  let sentenceIndex = 0
+  let wordInSentence = 0
+  let globalWordCounter = 0
+  let lastScratch: ScratchStyle | undefined
+  let lastAutoMistakeWordIdx = -10
 
   for (let pIdx = 0; pIdx < paragraphs.length; pIdx++) {
-    const para = paragraphs[pIdx].trim()
-    if (!para) {
+    const para = paragraphs[pIdx]
+    if (pIdx > 0) {
       tokens.push({
-        rawText: '',
-        sentenceIndex: sentenceCounter,
-        globalIndex: globalWordIdx,
-        isManualStrike: false,
+        raw: '',
+        isExplicitMistake: false,
+        isAutoMistake: false,
+        sentenceIndex,
+        wordIndexInSentence: wordInSentence,
         isParagraphBreak: true,
       })
-      sentenceCounter++
-      continue
     }
 
-    const rawWords = para.split(/\s+/).filter(Boolean)
+    const rawWords = para.split(/\s+/).filter((w) => w.length > 0)
     for (let wIdx = 0; wIdx < rawWords.length; wIdx++) {
-      globalWordIdx++
       const word = rawWords[wIdx]
+      globalWordCounter++
 
-      if (word.startsWith('~') && word.endsWith('~') && word.length > 2) {
-        const inner = word.slice(1, -1)
-        const style = pickScratchStyle(seed + globalWordIdx * 37, lastScratchStyle)
-        lastScratchStyle = style
+      const explicitMatch =
+        word.match(/^~(.+)~$/) || word.match(/^~~(.+)~~$/)
+      if (explicitMatch && explicitMatch[1].length > 0) {
+        const inner = explicitMatch[1]
+        const style = pickScratchStyle(
+          seed + globalWordCounter * 37,
+          lastScratch
+        )
+        lastScratch = style
         tokens.push({
-          rawText: inner,
-          sentenceIndex: sentenceCounter,
-          globalIndex: globalWordIdx,
-          isManualStrike: true,
-          preMistake: {
-            mistakenText: inner,
-            kind: 'manual-strike',
-            scratchStyle: style,
-            isCaretSuperscript: false,
-            id: `manual-${globalWordIdx}`,
-          },
+          raw: inner,
+          isExplicitMistake: true,
+          isAutoMistake: false,
+          mistakenText: inner,
+          scratchStyle: style,
+          sentenceIndex,
+          wordIndexInSentence: wordInSentence,
         })
+        mistakes.push({
+          id: `m-exp-${globalWordCounter}`,
+          mistakenText: inner,
+          intendedWord: '(manual cross-out)',
+          kind: 'manual-strike',
+          scratchStyle: style,
+          isCaretSuperscript: false,
+        })
+        wordInSentence++
         continue
       }
 
       const cleanAlpha = word.replace(/[^a-zA-Z]/g, '')
-      const roll = pseudoRand(seed, globalWordIdx * 53 + 19)
+      const rMistake = seededRand(seed + globalWordCounter * 113)
+      const nextRaw = rawWords[wIdx + 1] || ''
+      const prevWasExplicit =
+        wIdx > 0 && /^~.+~$/.test(rawWords[wIdx - 1])
+      const nextIsExplicit = /^~.+~$/.test(nextRaw)
 
-      let preMistake: WordToken['preMistake'] | undefined
-      if (cooldown > 0) {
-        cooldown--
-      } else if (
+      if (
         mistakeFrequency > 0 &&
-        cleanAlpha.length >= 3 &&
-        roll < mistakeFrequency
+        cleanAlpha.length >= 4 &&
+        !prevWasExplicit &&
+        !nextIsExplicit &&
+        globalWordCounter - lastAutoMistakeWordIdx >= 7 &&
+        rMistake < mistakeFrequency
       ) {
+        lastAutoMistakeWordIdx = globalWordCounter
         const synth = synthesizeMistakenText(
           cleanAlpha,
-          seed + globalWordIdx * 71
+          seed + globalWordCounter * 251
         )
         const style = pickScratchStyle(
-          seed + globalWordIdx * 89,
-          lastScratchStyle
+          seed + globalWordCounter * 389,
+          lastScratch
         )
-        lastScratchStyle = style
-        preMistake = {
+        lastScratch = style
+
+        tokens.push({
+          raw: word,
+          isExplicitMistake: false,
+          isAutoMistake: true,
           mistakenText: synth.mistakenText,
+          scratchStyle: style,
+          isCaretSuperscript: synth.isCaretSuperscript,
+          sentenceIndex,
+          wordIndexInSentence: wordInSentence,
+        })
+
+        mistakes.push({
+          id: `m-auto-${globalWordCounter}`,
+          mistakenText: synth.mistakenText,
+          intendedWord: word,
           kind: synth.kind,
           scratchStyle: style,
           isCaretSuperscript: synth.isCaretSuperscript,
-          id: `mistake-${globalWordIdx}`,
-        }
-        cooldown = 5
+        })
+      } else {
+        tokens.push({
+          raw: word,
+          isExplicitMistake: false,
+          isAutoMistake: false,
+          sentenceIndex,
+          wordIndexInSentence: wordInSentence,
+        })
       }
 
-      tokens.push({
-        rawText: word,
-        sentenceIndex: sentenceCounter,
-        globalIndex: globalWordIdx,
-        isManualStrike: false,
-        preMistake,
-      })
+      wordInSentence++
 
-      if (/[.!?;:]$/.test(word) || (word.endsWith(',') && wIdx % 6 === 5)) {
-        sentenceCounter++
+      if (/[.!?]["')]*$/.test(word)) {
+        sentenceIndex++
+        wordInSentence = 0
       }
-    }
-
-    if (pIdx < paragraphs.length - 1) {
-      tokens.push({
-        rawText: '',
-        sentenceIndex: sentenceCounter,
-        globalIndex: globalWordIdx,
-        isManualStrike: false,
-        isParagraphBreak: true,
-      })
-      sentenceCounter++
     }
   }
 
-  return tokens
+  return { tokens, mistakes }
 }
 
-function renderPaperSurface(
+function drawPaperSurface(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
   paperStyle: PaperStyleId,
+  pageIndex: number,
   seed: number
 ) {
   ctx.save()
@@ -218,752 +223,685 @@ function renderPaperSurface(
     return
   }
 
-  if (paperStyle === 'natural-bond' || paperStyle === 'exam-booklet') {
-    const grad = ctx.createLinearGradient(0, 0, width, height)
-    if (paperStyle === 'natural-bond') {
-      grad.addColorStop(0, '#fcfbf7')
-      grad.addColorStop(0.5, '#f8f6f0')
-      grad.addColorStop(1, '#f3efe6')
-    } else {
-      grad.addColorStop(0, '#f7f5ec')
-      grad.addColorStop(1, '#eeeadd')
-    }
-    ctx.fillStyle = grad
-    ctx.fillRect(0, 0, width, height)
+  if (paperStyle === 'legal-pad') {
+    ctx.fillStyle = '#fbf5d9'
   } else if (paperStyle === 'college-ruled') {
-    ctx.fillStyle = '#fbfaf6'
-    ctx.fillRect(0, 0, width, height)
+    ctx.fillStyle = '#fcfbf7'
+  } else {
+    ctx.fillStyle = '#faf7f0'
+  }
+  ctx.fillRect(0, 0, width, height)
 
-    ctx.strokeStyle = 'rgba(125, 168, 224, 0.36)'
-    ctx.lineWidth = 1.4
-    const topMargin = Math.round(height * 0.1)
-    const ruleGap = Math.round(height * 0.036)
-    for (let y = topMargin; y < height - height * 0.05; y += ruleGap) {
+  const grad = ctx.createRadialGradient(
+    width * 0.48,
+    height * 0.46,
+    width * 0.1,
+    width * 0.5,
+    height * 0.5,
+    width * 0.85
+  )
+  grad.addColorStop(0, 'rgba(255, 255, 255, 0)')
+  grad.addColorStop(1, 'rgba(175, 160, 132, 0.12)')
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, width, height)
+
+  ctx.lineWidth = 0.65
+  for (let i = 0; i < 420; i++) {
+    const r1 = seededRand(seed + pageIndex * 1000 + i * 3)
+    const r2 = seededRand(seed + pageIndex * 1000 + i * 3 + 1)
+    const r3 = seededRand(seed + pageIndex * 1000 + i * 3 + 2)
+    const fx = r1 * width
+    const fy = r2 * height
+    const len = 3 + r3 * 9
+    const ang = r1 * Math.PI * 2
+    ctx.strokeStyle =
+      i % 2 === 0
+        ? 'rgba(140, 128, 108, 0.045)'
+        : 'rgba(255, 255, 255, 0.06)'
+    ctx.beginPath()
+    ctx.moveTo(fx, fy)
+    ctx.lineTo(fx + Math.cos(ang) * len, fy + Math.sin(ang) * len)
+    ctx.stroke()
+  }
+
+  if (paperStyle === 'college-ruled' || paperStyle === 'legal-pad') {
+    const topMargin = height * 0.085
+    const lineSpacing = height * 0.031
+    ctx.strokeStyle =
+      paperStyle === 'legal-pad'
+        ? 'rgba(135, 175, 210, 0.42)'
+        : 'rgba(145, 182, 228, 0.38)'
+    ctx.lineWidth = 1.2
+
+    for (let y = topMargin; y < height - height * 0.05; y += lineSpacing) {
       ctx.beginPath()
       ctx.moveTo(0, y)
       ctx.lineTo(width, y)
       ctx.stroke()
     }
 
-    const marginX = Math.round(width * 0.115)
-    ctx.strokeStyle = 'rgba(218, 108, 118, 0.42)'
-    ctx.lineWidth = 1.8
+    const marginX = width * 0.105
+    ctx.strokeStyle = 'rgba(218, 108, 108, 0.42)'
+    ctx.lineWidth = 1.5
     ctx.beginPath()
     ctx.moveTo(marginX, 0)
     ctx.lineTo(marginX, height)
     ctx.stroke()
-  } else if (paperStyle === 'legal-pad') {
-    const grad = ctx.createLinearGradient(0, 0, 0, height)
-    grad.addColorStop(0, '#fef9d8')
-    grad.addColorStop(1, '#f9f1be')
-    ctx.fillStyle = grad
-    ctx.fillRect(0, 0, width, height)
-
-    ctx.strokeStyle = 'rgba(110, 158, 210, 0.38)'
-    ctx.lineWidth = 1.4
-    const topMargin = Math.round(height * 0.105)
-    const ruleGap = Math.round(height * 0.038)
-    for (let y = topMargin; y < height - height * 0.05; y += ruleGap) {
-      ctx.beginPath()
-      ctx.moveTo(0, y)
-      ctx.lineTo(width, y)
-      ctx.stroke()
-    }
-
-    const mX = Math.round(width * 0.12)
-    ctx.strokeStyle = 'rgba(210, 85, 85, 0.45)'
-    ctx.lineWidth = 1.5
-    ctx.beginPath()
-    ctx.moveTo(mX, 0)
-    ctx.lineTo(mX, height)
-    ctx.moveTo(mX + 8, 0)
-    ctx.lineTo(mX + 8, height)
-    ctx.stroke()
-  }
-
-  ctx.fillStyle = 'rgba(110, 100, 85, 0.022)'
-  for (let i = 0; i < 280; i++) {
-    const gx = pseudoRand(seed, i * 3 + 1) * width
-    const gy = pseudoRand(seed, i * 3 + 2) * height
-    const gw = 1 + pseudoRand(seed, i * 3 + 3) * 3
-    ctx.fillRect(gx, gy, gw, 1.2)
   }
 
   ctx.restore()
-}
-
-function renderHandwrittenWord(
-  ctx: CanvasRenderingContext2D,
-  wordText: string,
-  startX: number,
-  startY: number,
-  wordTiltRad: number,
-  wordHeightScale: number,
-  config: CompositorConfig,
-  scheduler: AllographScheduler,
-  usedAllographs: Set<string>,
-  wordSeed: number,
-  telemetryBounds: { minH: number; maxH: number }
-): { advanceX: number; endBaselineY: number; glyphsDrawn: number } {
-  const chars = Array.from(wordText)
-  const palette = INK_PALETTES[config.inkColor]
-  const style = HAND_STYLES[config.handStyle]
-  const [r, g, b] = palette.rgb
-
-  let localX = 0
-  let prevExitX: number | null = null
-  let prevExitY: number | null = null
-  let prevCanConnect = false
-  let glyphsDrawn = 0
-
-  ctx.save()
-  ctx.translate(startX, startY)
-  ctx.rotate(wordTiltRad)
-
-  for (let cIdx = 0; cIdx < chars.length; cIdx++) {
-    const ch = chars[cIdx]
-    const pos: 'initial' | 'medial' | 'final' | 'single' =
-      chars.length === 1
-        ? 'single'
-        : cIdx === 0
-          ? 'initial'
-          : cIdx === chars.length - 1
-            ? 'final'
-            : 'medial'
-
-    const variantIdx = scheduler.nextVariant(ch, pos)
-    usedAllographs.add(`${ch}:${variantIdx}`)
-
-    const glyph = getOrSynthesizeAllograph(
-      ch,
-      variantIdx,
-      config.handStyle,
-      config.inkColor,
-      config.fontSizePx
-    )
-
-    const hInt = config.unevenHeightIntensity
-    const charWave = Math.sin(cIdx * 1.4 + wordSeed * 0.7)
-    const charRandY = signedRand(wordSeed, cIdx * 31 + 7)
-    const charRandX = signedRand(wordSeed, cIdx * 43 + 13)
-    const charBounceRand = signedRand(wordSeed, cIdx * 59 + 23)
-    const charRotRand = signedRand(wordSeed, cIdx * 67 + 29)
-
-    // Uneven letter height within the word
-    const charHeightScale = Math.max(
-      0.68,
-      Math.min(
-        1.42,
-        wordHeightScale *
-          (1.0 + hInt * (0.15 * charRandY + 0.08 * charWave))
-      )
-    )
-    const charWidthScale = Math.max(
-      0.84,
-      Math.min(1.22, 1.0 + hInt * 0.09 * charRandX)
-    )
-
-    if (/[a-zA-Z]/.test(ch)) {
-      telemetryBounds.minH = Math.min(telemetryBounds.minH, charHeightScale)
-      telemetryBounds.maxH = Math.max(telemetryBounds.maxH, charHeightScale)
-    }
-
-    // Per-character vertical bounce off the word's diagonal baseline
-    const charBounceY =
-      hInt * (charBounceRand * config.fontSizePx * 0.072)
-
-    const charRotRad =
-      charRotRand * 0.055 * Math.max(0.4, config.diagonalDriftIntensity * 0.75)
-
-    ctx.save()
-    ctx.translate(localX, charBounceY)
-    ctx.rotate(charRotRad)
-    ctx.scale(charWidthScale, charHeightScale)
-    ctx.drawImage(glyph.canvas, -glyph.anchorX, -glyph.baselineY)
-    ctx.restore()
-
-    const currentCanReceive = /[a-z]/.test(ch) && ch !== 'x' && ch !== 'z'
-    if (
-      prevCanConnect &&
-      currentCanReceive &&
-      prevExitX !== null &&
-      prevExitY !== null &&
-      pseudoRand(wordSeed, cIdx * 83) < style.ligatureRate
-    ) {
-      const entryX = localX + config.fontSizePx * 0.05
-      const entryY = charBounceY - config.fontSizePx * 0.15 * charHeightScale
-      const midX = (prevExitX + entryX) * 0.5
-      const midY = Math.max(prevExitY, entryY) + config.fontSizePx * 0.04
-
-      ctx.beginPath()
-      ctx.moveTo(prevExitX, prevExitY)
-      ctx.quadraticCurveTo(midX, midY, entryX, entryY)
-      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${(palette.dryAlpha * 0.65).toFixed(3)})`
-      ctx.lineWidth = Math.max(1.2, (config.fontSizePx / 28) * style.strokeWeight)
-      ctx.lineCap = 'round'
-      ctx.stroke()
-    }
-
-    const kernJitter =
-      signedRand(wordSeed, cIdx * 97 + 41) * config.fontSizePx * 0.032
-    const stepX = Math.max(
-      config.fontSizePx * 0.22,
-      glyph.advanceWidth * charWidthScale * 0.93 + kernJitter
-    )
-
-    prevExitX = localX + stepX * 0.88
-    prevExitY = charBounceY - config.fontSizePx * 0.14 * charHeightScale
-    prevCanConnect = /[acdehilmnorstuvwy]/.test(ch)
-
-    localX += stepX
-    glyphsDrawn++
-  }
-
-  ctx.restore()
-
-  const advanceX = Math.cos(wordTiltRad) * localX
-  const endBaselineY = startY + Math.sin(wordTiltRad) * localX
-
-  return {
-    advanceX: Math.max(config.fontSizePx * 0.28, advanceX),
-    endBaselineY,
-    glyphsDrawn,
-  }
-}
-
-function estimateWordWidth(wordText: string, fontSizePx: number): number {
-  return wordText.length * fontSizePx * 0.48
 }
 
 export function renderHandwrittenDocument(
   canvases: HTMLCanvasElement[],
   config: CompositorConfig,
-  pageWidthPx = 1700,
-  pageHeightPx = 2200
+  pageWidth = 1700,
+  pageHeight = 2200
 ): {
   activePages: HTMLCanvasElement[]
   telemetry: CompositorTelemetry
 } {
-  const tokens = tokenizeWithMistakes(
+  const style = HAND_STYLES[config.handStyle]
+  const palette = INK_PALETTES[config.inkColor]
+  const selector = new AllographSequenceSelector(config.seed)
+  const usedAllographKeys = new Set<string>()
+
+  const { tokens, mistakes } = tokenizeInputWithMistakes(
     config.text,
     config.mistakeFrequency,
     config.seed
   )
-  const scheduler = new AllographScheduler(config.seed)
-  const usedAllographs = new Set<string>()
-  const mistakes: RenderedMistakeRecord[] = []
-  const sentenceSlopesDeg: number[] = []
-  const wordSlopesSampleDeg: number[] = []
-  const telemetryBounds = { minH: 1.0, maxH: 1.0 }
 
-  // Non-uniform Sentence-Level Diagonal Drift Profiles
-  const sentenceProfiles = new Map<
+  const sentenceKinematics = new Map<
     number,
-    { slopeRad: number; sentenceHeightBias: number }
+    {
+      slopeRad: number
+      slopeDeg: number
+      quadArchFactor: number
+      wordStepBiasY: number
+    }
   >()
 
-  let prevSign = -1
-  for (let s = 0; s <= 300; s++) {
-    const rMag = 0.3 + 0.7 * pseudoRand(config.seed, s * 41 + 7)
-    const flipRoll = pseudoRand(config.seed, s * 67 + 13)
-    const sign = flipRoll < 0.6 ? -prevSign : prevSign
-    prevSign = sign
+  const getSentenceKinematics = (sIdx: number) => {
+    const existing = sentenceKinematics.get(sIdx)
+    if (existing) return existing
 
-    // Diagonal slope in degrees: e.g. -4.5° to +4.8° scaled by diagonalDriftIntensity
-    const deg =
-      sign *
-      (1.3 + 3.1 * rMag) *
-      Math.max(0.15, config.diagonalDriftIntensity)
-    const slopeRad = (deg * Math.PI) / 180
-    const sentenceHeightBias =
-      1.0 +
-      signedRand(config.seed, s * 103 + 37) *
-        0.15 *
-        config.unevenHeightIntensity
+    const r1 = seededRand(config.seed + sIdx * 97 + 13)
+    const r2 = seededRand(config.seed + sIdx * 193 + 29)
+    const r3 = seededRand(config.seed + sIdx * 311 + 47)
 
-    sentenceProfiles.set(s, { slopeRad, sentenceHeightBias })
-    if (s < 24) {
-      sentenceSlopesDeg.push(Number(deg.toFixed(1)))
+    const dir = sIdx % 3 === 0 ? -1 : sIdx % 3 === 1 ? 1 : r1 > 0.48 ? 1 : -1
+    const baseAngleDeg =
+      dir * (0.85 + r1 * 2.95) * config.diagonalDriftIntensity +
+      (r2 - 0.5) * 1.4 * config.diagonalDriftIntensity
+    const slopeRad = (baseAngleDeg * Math.PI) / 180
+    const quadArchFactor =
+      (r2 - 0.46) * 0.00018 * config.diagonalDriftIntensity
+    const wordStepBiasY = (r3 - 0.48) * 2.2 * config.diagonalDriftIntensity
+
+    const kin = {
+      slopeRad,
+      slopeDeg: baseAngleDeg,
+      quadArchFactor,
+      wordStepBiasY,
     }
+    sentenceKinematics.set(sIdx, kin)
+    return kin
   }
 
-  // Group tokens into lines first so each line's full diagonal trajectory can be
-  // positioned safely below the previous line without mid-line vertical jumps!
-  const baseLeftMargin =
-    config.paperStyle === 'college-ruled' || config.paperStyle === 'legal-pad'
-      ? Math.round(pageWidthPx * 0.135)
-      : Math.round(pageWidthPx * 0.088)
-  const baseRightLimit = Math.round(pageWidthPx * 0.915)
-
-  interface PlannedLine {
-    tokens: WordToken[]
-    isParaStart: boolean
-    lineIndex: number
-    startX: number
-    lineSlopeRad: number
-    wristArcAmp: number
-  }
-
-  const plannedLines: PlannedLine[] = []
-  let currentLineTokens: WordToken[] = []
-  let isNextParaStart = false
-  let lineCounter = 0
-
-  const createPlannedLineMeta = (lIdx: number, isPara: boolean) => {
-    const leftWander =
-      (signedRand(config.seed, lIdx * 61 + 3) * 0.85 +
-        Math.sin(lIdx * 0.7) * 0.45) *
-      config.fontSizePx *
-      0.85 *
-      config.marginWanderIntensity
-    const paraIndent = isPara
-      ? config.fontSizePx * (0.9 + 0.45 * pseudoRand(config.seed, lIdx * 23))
-      : 0
-    const startX = Math.max(
-      pageWidthPx * 0.045,
-      baseLeftMargin + leftWander + paraIndent
-    )
-    const lineDeg =
-      signedRand(config.seed, lIdx * 79 + 17) *
-      3.2 *
-      config.diagonalDriftIntensity
-    const wristArcAmp =
-      signedRand(config.seed, lIdx * 93 + 31) *
-      config.fontSizePx *
-      0.42 *
-      config.diagonalDriftIntensity
-    return {
-      startX,
-      lineSlopeRad: (lineDeg * Math.PI) / 180,
-      wristArcAmp,
-    }
-  }
-
-  let curMeta = createPlannedLineMeta(0, false)
-  let simX = curMeta.startX
-
-  for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i]
-    if (tok.isParagraphBreak) {
-      if (currentLineTokens.length > 0) {
-        plannedLines.push({
-          tokens: currentLineTokens,
-          isParaStart: isNextParaStart,
-          lineIndex: lineCounter,
-          ...curMeta,
-        })
-        currentLineTokens = []
-        lineCounter++
-      }
-      isNextParaStart = true
-      curMeta = createPlannedLineMeta(lineCounter, true)
-      simX = curMeta.startX
-      continue
-    }
-
-    const lineRightLimit =
-      baseRightLimit +
-      signedRand(config.seed, lineCounter * 97 + 5) *
-        config.fontSizePx *
-        1.25 *
-        config.marginWanderIntensity
-
-    const estW =
-      estimateWordWidth(tok.rawText, config.fontSizePx) +
-      (tok.preMistake && !tok.isManualStrike
-        ? estimateWordWidth(tok.preMistake.mistakenText, config.fontSizePx) +
-          config.fontSizePx * 0.65
-        : 0)
-
-    if (
-      simX + estW > lineRightLimit &&
-      currentLineTokens.length > 0
-    ) {
-      plannedLines.push({
-        tokens: currentLineTokens,
-        isParaStart: isNextParaStart,
-        lineIndex: lineCounter,
-        ...curMeta,
-      })
-      currentLineTokens = [tok]
-      isNextParaStart = false
-      lineCounter++
-      curMeta = createPlannedLineMeta(lineCounter, false)
-      simX = curMeta.startX + estW + config.fontSizePx * 0.45
-    } else {
-      currentLineTokens.push(tok)
-      simX += estW + config.fontSizePx * 0.45
-    }
-  }
-
-  if (currentLineTokens.length > 0) {
-    plannedLines.push({
-      tokens: currentLineTokens,
-      isParaStart: isNextParaStart,
-      lineIndex: lineCounter,
-      ...curMeta,
-    })
-  }
-
-  const ensureCanvasPage = (pageIndex: number): HTMLCanvasElement => {
-    while (canvases.length <= pageIndex) {
+  const ensurePage = (idx: number): HTMLCanvasElement => {
+    while (canvases.length <= idx) {
       const c = document.createElement('canvas')
-      c.width = pageWidthPx
-      c.height = pageHeightPx
+      c.width = pageWidth
+      c.height = pageHeight
       canvases.push(c)
     }
-    const c = canvases[pageIndex]
-    if (c.width !== pageWidthPx || c.height !== pageHeightPx) {
-      c.width = pageWidthPx
-      c.height = pageHeightPx
+    const pageCanvas = canvases[idx]
+    if (pageCanvas.width !== pageWidth || pageCanvas.height !== pageHeight) {
+      pageCanvas.width = pageWidth
+      pageCanvas.height = pageHeight
     }
-    const ctx = c.getContext('2d')!
-    renderPaperSurface(
+    const ctx = pageCanvas.getContext('2d')!
+    drawPaperSurface(
       ctx,
-      pageWidthPx,
-      pageHeightPx,
+      pageWidth,
+      pageHeight,
       config.paperStyle,
-      config.seed + pageIndex * 101
+      idx,
+      config.seed
     )
-    return c
+    return pageCanvas
   }
 
   let currentPageIdx = 0
-  let currentCanvas = ensureCanvasPage(0)
+  let currentCanvas = ensurePage(0)
   let ctx = currentCanvas.getContext('2d')!
 
-  const topStart = Math.round(pageHeightPx * 0.1)
-  const bottomLimit = Math.round(pageHeightPx * 0.915)
-  const baseLineHeight = Math.round(config.fontSizePx * 1.72)
-  const minLineClearance = Math.round(config.fontSizePx * 1.32)
+  const baseLeftMargin =
+    config.paperStyle === 'college-ruled' || config.paperStyle === 'legal-pad'
+      ? pageWidth * 0.12
+      : pageWidth * 0.082
+  const baseRightMargin = pageWidth * 0.925
+  const topStart = pageHeight * 0.095
+  const bottomLimit = pageHeight * 0.92
+  const baseLineSpacing = config.fontSizePx * 1.65
 
-  const NUM_BUCKETS = 34
-  let prevLineFloorByBucket = new Array<number>(NUM_BUCKETS).fill(
-    topStart - baseLineHeight
-  )
+  let lineNumberOnPage = 0
+  let cursorY = topStart
+  let prevLineActualYProfile: Float32Array | null = null
 
-  let totalWords = 0
-  let totalGlyphs = 0
-  const palette = INK_PALETTES[config.inkColor]
+  const getLineMargins = (lineNum: number) => {
+    const r1 = seededRand(
+      config.seed + currentPageIdx * 500 + lineNum * 41
+    )
+    const r2 = seededRand(
+      config.seed + currentPageIdx * 500 + lineNum * 73
+    )
 
-  for (let lIdx = 0; lIdx < plannedLines.length; lIdx++) {
-    const line = plannedLines[lIdx]
-    const extraParaGap =
-      line.isParaStart && lIdx > 0 ? config.fontSizePx * 0.65 : 0
-    const lineGapJitter =
-      signedRand(config.seed, lIdx * 47 + 9) *
+    const fatigueDrift = lineNum * 1.15 * config.marginWanderIntensity
+    const waveLeft =
+      Math.sin(lineNum * 0.55 + config.seed) *
+        20 *
+        config.marginWanderIntensity +
+      (r1 - 0.45) * 24 * config.marginWanderIntensity
+    const waveRight =
+      Math.cos(lineNum * 0.48 + config.seed * 0.5) *
+        30 *
+        config.marginWanderIntensity +
+      (r2 - 0.5) * 38 * config.marginWanderIntensity
+
+    return {
+      left: Math.max(
+        pageWidth * 0.045,
+        baseLeftMargin + fatigueDrift + waveLeft
+      ),
+      right: Math.min(pageWidth * 0.96, baseRightMargin + waveRight),
+    }
+  }
+
+  let currentMargins = getLineMargins(0)
+  let cursorX = currentMargins.left
+  let lineStartOriginX = cursorX
+  let currentLineDriftY = 0
+
+  let totalWordsCount = 0
+  let totalGlyphsCount = 0
+  const wordSlopesSampleDeg: number[] = []
+  let minHeightSeen = 1.0
+  let maxHeightSeen = 1.0
+
+  const startNewLine = (extraGapMultiplier = 1.0) => {
+    lineNumberOnPage++
+    const rGap = seededRand(
+      config.seed + currentPageIdx * 313 + lineNumberOnPage * 89
+    )
+    const gapJitter =
+      (rGap - 0.45) *
       config.fontSizePx *
-      0.26 *
-      config.unevenHeightIntensity
+      0.32 *
+      (0.5 + config.diagonalDriftIntensity * 0.5)
 
-    // Lookahead pass: trace the relative vertical offset of this line across X buckets
-    // so we can choose a single clean starting Y that never collides with the previous line!
-    const relYByBucket = new Array<number>(NUM_BUCKETS).fill(0)
-    let lookX = line.startX
-    let lookRelY = 0
-    for (const tok of line.tokens) {
-      const sProf =
-        sentenceProfiles.get(tok.sentenceIndex) ?? sentenceProfiles.get(0)!
-      const slopeRad = sProf.slopeRad * 0.65 + line.lineSlopeRad * 0.55
-      const wEst =
-        estimateWordWidth(tok.rawText, config.fontSizePx) +
-        (tok.preMistake && !tok.isManualStrike
-          ? estimateWordWidth(tok.preMistake.mistakenText, config.fontSizePx) +
-            config.fontSizePx * 0.65
-          : 0)
-      const prog = Math.max(
-        0,
-        Math.min(1, (lookX - baseLeftMargin) / (baseRightLimit - baseLeftMargin))
-      )
-      const arcDy = Math.sin(prog * Math.PI) * line.wristArcAmp
-      const b0 = Math.max(
-        0,
-        Math.min(NUM_BUCKETS - 1, Math.floor((lookX / pageWidthPx) * NUM_BUCKETS))
-      )
-      const b1 = Math.max(
-        0,
-        Math.min(
-          NUM_BUCKETS - 1,
-          Math.floor(((lookX + wEst) / pageWidthPx) * NUM_BUCKETS)
+    let minAllowedY = cursorY + baseLineSpacing * extraGapMultiplier + gapJitter
+    if (prevLineActualYProfile !== null) {
+      let maxPrevLineY = 0
+      for (let i = 0; i < prevLineActualYProfile.length; i++) {
+        if (prevLineActualYProfile[i] > maxPrevLineY) {
+          maxPrevLineY = prevLineActualYProfile[i]
+        }
+      }
+      if (maxPrevLineY > 0) {
+        minAllowedY = Math.max(
+          minAllowedY,
+          maxPrevLineY + config.fontSizePx * 1.14
         )
-      )
-      for (let b = b0; b <= b1; b++) {
-        relYByBucket[b] = Math.min(relYByBucket[b], lookRelY + arcDy)
-      }
-      const step = wEst + config.fontSizePx * 0.45
-      lookX += step
-      lookRelY += step * Math.tan(slopeRad)
-    }
-
-    // Find required starting Y so every bucket clears prevLineFloorByBucket
-    let requiredStartY =
-      prevLineFloorByBucket[2] + baseLineHeight * 0.85 + extraParaGap + lineGapJitter
-    for (let b = 0; b < NUM_BUCKETS; b++) {
-      const neededAtB =
-        prevLineFloorByBucket[b] +
-        minLineClearance +
-        extraParaGap -
-        relYByBucket[b]
-      if (neededAtB > requiredStartY) {
-        requiredStartY = neededAtB
       }
     }
 
-    if (requiredStartY > bottomLimit) {
+    cursorY = minAllowedY
+
+    if (cursorY > bottomLimit) {
       currentPageIdx++
-      currentCanvas = ensureCanvasPage(currentPageIdx)
+      currentCanvas = ensurePage(currentPageIdx)
       ctx = currentCanvas.getContext('2d')!
-      requiredStartY =
+      lineNumberOnPage = 0
+      cursorY =
         topStart +
-        signedRand(config.seed, currentPageIdx * 71) *
-          config.fontSizePx *
-          0.3
-      prevLineFloorByBucket = new Array<number>(NUM_BUCKETS).fill(
-        requiredStartY - baseLineHeight
-      )
+        (seededRand(config.seed + currentPageIdx * 17) - 0.5) * 18
+      prevLineActualYProfile = null
     }
 
-    const currentLineFloor = new Array<number>(NUM_BUCKETS).fill(requiredStartY)
-    const recordSpan = (x0: number, x1: number, y0: number, y1: number) => {
-      const b0 = Math.max(
-        0,
-        Math.min(NUM_BUCKETS - 1, Math.floor((x0 / pageWidthPx) * NUM_BUCKETS))
-      )
-      const b1 = Math.max(
-        0,
-        Math.min(NUM_BUCKETS - 1, Math.floor((x1 / pageWidthPx) * NUM_BUCKETS))
-      )
-      const floorY = Math.max(y0, y1) + config.fontSizePx * 0.22
-      for (let b = b0; b <= b1; b++) {
-        currentLineFloor[b] = Math.max(currentLineFloor[b], floorY)
-      }
+    currentMargins = getLineMargins(lineNumberOnPage)
+    cursorX = currentMargins.left
+    lineStartOriginX = cursorX
+    currentLineDriftY = 0
+  }
+
+  const renderWordUnit = (
+    wordStr: string,
+    xPos: number,
+    yPos: number,
+    sentenceIdx: number,
+    wordSalt: number,
+    scaleMultiplier = 1.0
+  ): {
+    width: number
+    wordTiltRad: number
+    endBaselineY: number
+  } => {
+    const rw1 = seededRand(config.seed + wordSalt * 53)
+    const rw2 = seededRand(config.seed + wordSalt * 97)
+
+    const sKin = getSentenceKinematics(sentenceIdx)
+
+    const wordSlopeDeltaDeg =
+      ((rw1 - 0.48) * 5.4 + Math.sin(wordSalt * 1.7) * 2.2) *
+      config.diagonalDriftIntensity
+    const totalWordAngleDeg =
+      (sKin.slopeRad * 180) / Math.PI * 0.45 + wordSlopeDeltaDeg
+    const wordTiltRad = (totalWordAngleDeg * Math.PI) / 180
+
+    if (wordSlopesSampleDeg.length < 32 && scaleMultiplier === 1.0) {
+      wordSlopesSampleDeg.push(Number(totalWordAngleDeg.toFixed(2)))
     }
 
-    let cursorX = line.startX
-    let runningDeltaY = 0
+    const wordBaselineHop =
+      (rw2 - 0.48) * 5.8 * config.diagonalDriftIntensity
+    const effectiveFontSize = Math.round(config.fontSizePx * scaleMultiplier)
 
-    for (let wIdx = 0; wIdx < line.tokens.length; wIdx++) {
-      const token = line.tokens[wIdx]
-      const wordSeed = config.seed + token.globalIndex * 131 + 17
-      const sProfile =
-        sentenceProfiles.get(token.sentenceIndex) ?? sentenceProfiles.get(0)!
+    let localX = 0
+    const chars = Array.from(wordStr)
+    const [inkR, inkG, inkB] = palette.rgb
+    let prevCharExitX: number | null = null
+    let prevCharExitY: number | null = null
 
-      const activeTrajectoryRad =
-        sProfile.slopeRad * 0.65 + line.lineSlopeRad * 0.55
+    for (let cIdx = 0; cIdx < chars.length; cIdx++) {
+      const ch = chars[cIdx]
+      const variantIdx = selector.nextVariant(ch)
+      usedAllographKeys.add(`${ch}#${variantIdx}`)
 
-      const progressX = Math.max(
-        0,
+      const glyph = getOrSynthesizeAllograph(
+        ch,
+        variantIdx,
+        config.handStyle,
+        config.inkColor,
+        effectiveFontSize
+      )
+
+      const rc1 = seededRand(config.seed + wordSalt * 31 + cIdx * 17)
+      const rc2 = seededRand(config.seed + wordSalt * 67 + cIdx * 29)
+
+      const extraScaleY =
+        1.0 +
+        (rc1 - 0.48) * 0.24 * config.unevenHeightIntensity +
+        (glyph.descriptor.aspectScaleY - 1.0) *
+          0.35 *
+          (config.unevenHeightIntensity - 1.0)
+
+      const totalHeightRatio = glyph.descriptor.aspectScaleY * extraScaleY
+      if (totalHeightRatio < minHeightSeen) minHeightSeen = totalHeightRatio
+      if (totalHeightRatio > maxHeightSeen) maxHeightSeen = totalHeightRatio
+
+      const charBounceY =
+        glyph.descriptor.baselineShiftPx *
+          (0.65 + config.unevenHeightIntensity * 0.45) +
+        (rc2 - 0.5) * 2.8 * config.unevenHeightIntensity
+
+      const wordInternalDy = Math.tan(wordTiltRad) * localX
+
+      const gx = xPos + localX
+      const gy = Math.max(
+        68,
         Math.min(
-          1,
-          (cursorX - baseLeftMargin) / (baseRightLimit - baseLeftMargin)
+          pageHeight - 68,
+          yPos + wordBaselineHop + wordInternalDy + charBounceY
         )
       )
-      const wristArcOffset = Math.sin(progressX * Math.PI) * line.wristArcAmp
-      const wordVerticalStep =
-        signedRand(wordSeed, 19) *
-        config.fontSizePx *
-        0.13 *
-        config.diagonalDriftIntensity
 
-      const wordBaselineY =
-        requiredStartY + runningDeltaY + wristArcOffset + wordVerticalStep
+      ctx.save()
+      ctx.translate(gx, gy)
+      ctx.rotate(glyph.descriptor.rotationRad)
+      ctx.scale(1.0, extraScaleY)
+      ctx.drawImage(glyph.canvas, -glyph.anchorX, -glyph.baselineY)
+      ctx.restore()
 
-      // Each individual word has its own independent diagonal tilt angle!
-      const wordLocalTiltDeg =
-        (activeTrajectoryRad * 180) / Math.PI +
-        signedRand(wordSeed, 29) * 4.2 * config.diagonalDriftIntensity
-      const wordTiltRad = (wordLocalTiltDeg * Math.PI) / 180
-
-      if (wordSlopesSampleDeg.length < 36) {
-        wordSlopesSampleDeg.push(Number(wordLocalTiltDeg.toFixed(1)))
+      if (
+        cIdx > 0 &&
+        prevCharExitX !== null &&
+        prevCharExitY !== null &&
+        ch >= 'a' &&
+        ch <= 'z' &&
+        chars[cIdx - 1] >= 'a' &&
+        chars[cIdx - 1] <= 'z' &&
+        rc1 < style.ligatureRate
+      ) {
+        const entryX = gx + 2
+        const entryY = gy - effectiveFontSize * (0.14 + rc2 * 0.08)
+        if (entryX > prevCharExitX - 4 && entryX - prevCharExitX < 18) {
+          ctx.save()
+          ctx.beginPath()
+          ctx.moveTo(prevCharExitX, prevCharExitY)
+          const midX = (prevCharExitX + entryX) * 0.5
+          const midY = Math.max(prevCharExitY, entryY) + 1.4
+          ctx.quadraticCurveTo(midX, midY, entryX, entryY)
+          ctx.strokeStyle = `rgba(${inkR}, ${inkG}, ${inkB}, ${(
+            palette.wetAlpha * 0.52
+          ).toFixed(3)})`
+          ctx.lineWidth = Math.max(1.2, effectiveFontSize * 0.036)
+          ctx.lineCap = 'round'
+          ctx.stroke()
+          ctx.restore()
+        }
       }
 
-      // Each individual word has its own UNEVEN HEIGHT SCALE
-      const wordHeightJitter =
-        signedRand(wordSeed, 43) * 0.22 * config.unevenHeightIntensity
-      const wordHeightScale = Math.max(
-        0.72,
-        Math.min(1.36, sProfile.sentenceHeightBias + wordHeightJitter)
-      )
-
-      const estMainW = estimateWordWidth(token.rawText, config.fontSizePx)
+      prevCharExitX = gx + glyph.advanceWidth * 0.88
+      prevCharExitY = gy - effectiveFontSize * (0.12 + rc1 * 0.1)
 
       if (config.showForensicGuides) {
         ctx.save()
-        ctx.strokeStyle = 'rgba(224, 159, 62, 0.55)'
-        ctx.lineWidth = 1.6
-        ctx.beginPath()
-        ctx.moveTo(cursorX, wordBaselineY)
-        ctx.lineTo(
-          cursorX + Math.cos(wordTiltRad) * estMainW,
-          wordBaselineY + Math.sin(wordTiltRad) * estMainW
+        ctx.fillStyle = 'rgba(217, 119, 6, 0.78)'
+        ctx.font = '500 9px monospace'
+        ctx.fillText(
+          `v${variantIdx + 1}`,
+          gx,
+          gy + effectiveFontSize * 0.36
         )
-        ctx.stroke()
         ctx.restore()
       }
 
-      // 1. Render crossed-out mistake if present
-      if (token.preMistake) {
-        const m = token.preMistake
-        const mistakeTiltRad =
-          wordTiltRad + signedRand(wordSeed, 61) * 0.045
-        const mistakeHeightScale =
-          wordHeightScale * (0.94 + 0.1 * pseudoRand(wordSeed, 67))
+      const kernJitter = (rc1 - 0.52) * (effectiveFontSize * 0.04)
+      localX += Math.max(
+        effectiveFontSize * 0.15,
+        glyph.advanceWidth * 0.90 + kernJitter
+      )
+      totalGlyphsCount++
+    }
 
-        const mRes = renderHandwrittenWord(
-          ctx,
-          m.mistakenText,
-          cursorX,
-          wordBaselineY,
-          mistakeTiltRad,
-          mistakeHeightScale,
-          config,
-          scheduler,
-          usedAllographs,
-          wordSeed + 503,
-          telemetryBounds
+    const endBaselineY =
+      yPos + wordBaselineHop + Math.tan(wordTiltRad) * localX
+
+    if (config.showForensicGuides) {
+      ctx.save()
+      ctx.strokeStyle = 'rgba(22, 163, 74, 0.55)'
+      ctx.lineWidth = 1.2
+      ctx.setLineDash([4, 3])
+      ctx.beginPath()
+      ctx.moveTo(xPos, yPos + wordBaselineHop)
+      ctx.lineTo(xPos + localX, endBaselineY)
+      ctx.stroke()
+      ctx.restore()
+    }
+
+    return {
+      width: localX,
+      wordTiltRad,
+      endBaselineY,
+    }
+  }
+
+  const estimateWordWidth = (wordStr: string) =>
+    wordStr.length * config.fontSizePx * 0.38
+
+  let currentLineYProfile = new Float32Array(pageWidth)
+
+  for (let tIdx = 0; tIdx < tokens.length; tIdx++) {
+    const token = tokens[tIdx]
+
+    if (token.isParagraphBreak) {
+      prevLineActualYProfile = currentLineYProfile
+      currentLineYProfile = new Float32Array(pageWidth)
+      startNewLine(1.36)
+      continue
+    }
+
+    const sKin = getSentenceKinematics(token.sentenceIndex)
+
+    /**
+     * Computes the active baseline Y at `atX` using continuous incremental drift
+     * so starting a new sentence mid-line transitions its slope angle smoothly
+     * from the hand's current vertical position without any mid-line cliff!
+     */
+    const calcActiveY = (atX: number) => {
+      const clampedDrift = Math.max(-28, Math.min(32, currentLineDriftY))
+      let yVal = cursorY + clampedDrift
+
+      if (prevLineActualYProfile !== null) {
+        const colIdx = Math.max(
+          0,
+          Math.min(pageWidth - 1, Math.floor(atX))
         )
-
-        renderScratchOutOverlay(
-          ctx,
-          cursorX,
-          wordBaselineY,
-          mRes.advanceX,
-          config.fontSizePx * 0.54 * mistakeHeightScale,
-          mistakeTiltRad,
-          m.scratchStyle,
-          palette,
-          wordSeed + 709
-        )
-
-        recordSpan(
-          cursorX,
-          cursorX + mRes.advanceX,
-          wordBaselineY,
-          mRes.endBaselineY
-        )
-
-        mistakes.push({
-          id: m.id,
-          mistakenText: m.mistakenText,
-          intendedWord: token.rawText,
-          kind: m.kind,
-          scratchStyle: m.scratchStyle,
-          isCaretSuperscript: m.isCaretSuperscript,
-          pageIndex: currentPageIdx,
-          sentenceIndex: token.sentenceIndex,
-        })
-
-        totalGlyphs += mRes.glyphsDrawn
-
-        const mGap =
-          config.fontSizePx * (0.44 + 0.22 * pseudoRand(wordSeed, 83))
-        const totalStepX = mRes.advanceX + mGap
-
-        cursorX += totalStepX
-        runningDeltaY += totalStepX * Math.tan(activeTrajectoryRad)
-
-        if (token.isManualStrike) {
-          totalWords++
-          continue
-        }
-
-        if (m.isCaretSuperscript) {
-          const caretX = cursorX - mGap * 0.45
-          renderHandwrittenCaret(
-            ctx,
-            caretX,
-            wordBaselineY + config.fontSizePx * 0.05,
-            config.fontSizePx * 0.5,
-            palette,
-            wordSeed + 811
-          )
-
-          const superY = wordBaselineY - config.fontSizePx * 0.52
-          const superX = caretX - config.fontSizePx * 0.18
-          const superRes = renderHandwrittenWord(
-            ctx,
-            token.rawText,
-            superX,
-            superY,
-            wordTiltRad - 0.03,
-            wordHeightScale * 0.78,
-            config,
-            scheduler,
-            usedAllographs,
-            wordSeed + 919,
-            telemetryBounds
-          )
-          totalGlyphs += superRes.glyphsDrawn
-          totalWords++
-          cursorX += superRes.advanceX * 0.8
-          continue
+        const prevY = prevLineActualYProfile[colIdx]
+        const minGap = config.fontSizePx * 1.15
+        if (prevY > 0 && yVal - prevY < minGap) {
+          const pushDown = prevY + minGap - yVal
+          cursorY += pushDown
+          yVal += pushDown
         }
       }
 
-      const mainWordY =
-        requiredStartY + runningDeltaY + wristArcOffset + wordVerticalStep
-
-      // 2. Render the intended word
-      const mainRes = renderHandwrittenWord(
-        ctx,
-        token.rawText,
-        cursorX,
-        mainWordY,
-        wordTiltRad,
-        wordHeightScale,
-        config,
-        scheduler,
-        usedAllographs,
-        wordSeed,
-        telemetryBounds
-      )
-
-      recordSpan(
-        cursorX,
-        cursorX + mainRes.advanceX,
-        mainWordY,
-        mainRes.endBaselineY
-      )
-
-      totalWords++
-      totalGlyphs += mainRes.glyphsDrawn
-
-      const isSentenceEnd = /[.!?;:]$/.test(token.rawText)
-      const baseGap = isSentenceEnd
-        ? config.fontSizePx * 0.68
-        : config.fontSizePx * 0.44
-      const gapVariance =
-        signedRand(wordSeed, 109) *
-        config.fontSizePx *
-        0.18 *
-        Math.max(0.5, config.diagonalDriftIntensity)
-
-      const stepX =
-        mainRes.advanceX +
-        Math.max(config.fontSizePx * 0.28, baseGap + gapVariance)
-
-      cursorX += stepX
-      runningDeltaY += stepX * Math.tan(activeTrajectoryRad)
+      return Math.max(72, Math.min(pageHeight - 72, yVal))
     }
 
-    prevLineFloorByBucket = currentLineFloor
+    const advanceSentenceDrift = (stepDx: number) => {
+      const slopeStep = Math.tan(sKin.slopeRad) * stepDx * 0.62
+      const archStep =
+        sKin.quadArchFactor * stepDx * (cursorX - lineStartOriginX - 350)
+      currentLineDriftY = Math.max(
+        -28,
+        Math.min(
+          32,
+          currentLineDriftY + slopeStep + archStep + sKin.wordStepBiasY * 0.45
+        )
+      )
+    }
+
+    const recordSpanInLineProfile = (x0: number, x1: number, yVal: number) => {
+      const i0 = Math.max(0, Math.floor(x0 - 8))
+      const i1 = Math.min(pageWidth - 1, Math.ceil(x1 + 8))
+      for (let px = i0; px <= i1; px++) {
+        if (yVal > currentLineYProfile[px]) {
+          currentLineYProfile[px] = yVal
+        }
+      }
+    }
+
+    // 1. Explicit ~mistake~ token
+    if (token.isExplicitMistake && token.mistakenText && token.scratchStyle) {
+      const estW = estimateWordWidth(token.mistakenText)
+      if (
+        cursorX + estW > currentMargins.right &&
+        cursorX > currentMargins.left + 20
+      ) {
+        prevLineActualYProfile = currentLineYProfile
+        currentLineYProfile = new Float32Array(pageWidth)
+        startNewLine(1.0)
+      }
+
+      const activeY = calcActiveY(cursorX)
+      const rendered = renderWordUnit(
+        token.mistakenText,
+        cursorX,
+        activeY,
+        token.sentenceIndex,
+        tIdx * 19 + 3
+      )
+
+      renderScratchOutOverlay(
+        ctx,
+        cursorX,
+        activeY,
+        rendered.width,
+        config.fontSizePx * 0.48,
+        rendered.wordTiltRad,
+        token.scratchStyle,
+        palette,
+        config.seed + tIdx * 101
+      )
+
+      recordSpanInLineProfile(
+        cursorX,
+        cursorX + rendered.width,
+        Math.max(activeY, rendered.endBaselineY)
+      )
+
+      const spaceGap =
+        config.fontSizePx *
+        (0.42 + seededRand(config.seed + tIdx * 71) * 0.34)
+      const stepDx = rendered.width + spaceGap
+      cursorX += stepDx
+      advanceSentenceDrift(stepDx)
+      totalWordsCount++
+      continue
+    }
+
+    // 2. Automatic human mistake (false-start + scratch-out + correction)
+    if (token.isAutoMistake && token.mistakenText && token.scratchStyle) {
+      const estMistakeW = estimateWordWidth(token.mistakenText)
+      const estSuperW = token.isCaretSuperscript
+        ? estimateWordWidth(token.raw) * 0.78
+        : 0
+      if (
+        cursorX + estMistakeW + estSuperW > currentMargins.right &&
+        cursorX > currentMargins.left + 20
+      ) {
+        prevLineActualYProfile = currentLineYProfile
+        currentLineYProfile = new Float32Array(pageWidth)
+        startNewLine(1.0)
+      }
+
+      const mistakeY = calcActiveY(cursorX)
+      const mistakeRender = renderWordUnit(
+        token.mistakenText,
+        cursorX,
+        mistakeY,
+        token.sentenceIndex,
+        tIdx * 23 + 7
+      )
+
+      renderScratchOutOverlay(
+        ctx,
+        cursorX,
+        mistakeY,
+        mistakeRender.width,
+        config.fontSizePx * 0.48,
+        mistakeRender.wordTiltRad,
+        token.scratchStyle,
+        palette,
+        config.seed + tIdx * 137
+      )
+
+      recordSpanInLineProfile(
+        cursorX,
+        cursorX + mistakeRender.width,
+        Math.max(mistakeY, mistakeRender.endBaselineY)
+      )
+
+      if (token.isCaretSuperscript) {
+        const caretX =
+          cursorX + mistakeRender.width + config.fontSizePx * 0.24
+        renderHandwrittenCaret(
+          ctx,
+          caretX,
+          mistakeY + 4,
+          config.fontSizePx * 0.45,
+          palette,
+          config.seed + tIdx * 199
+        )
+
+        const superX = caretX - config.fontSizePx * 0.18
+        const superY = Math.max(
+          68,
+          mistakeY - config.fontSizePx * 0.68
+        )
+        const superRender = renderWordUnit(
+          token.raw,
+          superX,
+          superY,
+          token.sentenceIndex,
+          tIdx * 29 + 11,
+          0.76
+        )
+
+        const afterSpace =
+          config.fontSizePx *
+          (0.36 + seededRand(config.seed + tIdx * 83) * 0.24)
+        const nextCursorX = Math.max(
+          cursorX + mistakeRender.width + config.fontSizePx * 0.55,
+          superX + superRender.width + afterSpace
+        )
+        const stepDx = nextCursorX - cursorX
+        cursorX = nextCursorX
+        advanceSentenceDrift(stepDx)
+        totalWordsCount += 2
+        continue
+      } else {
+        const pauseGap =
+          config.fontSizePx *
+          (0.40 + seededRand(config.seed + tIdx * 59) * 0.28)
+        const stepDx = mistakeRender.width + pauseGap
+        cursorX += stepDx
+        advanceSentenceDrift(stepDx)
+        totalWordsCount++
+      }
+    }
+
+    // 3. Intended word
+    const estW = estimateWordWidth(token.raw)
+    if (
+      cursorX + estW > currentMargins.right &&
+      cursorX > currentMargins.left + 20
+    ) {
+      prevLineActualYProfile = currentLineYProfile
+      currentLineYProfile = new Float32Array(pageWidth)
+      startNewLine(1.0)
+    }
+
+    const wordY = calcActiveY(cursorX)
+    const rendered = renderWordUnit(
+      token.raw,
+      cursorX,
+      wordY,
+      token.sentenceIndex,
+      tIdx * 37 + 17
+    )
+
+    recordSpanInLineProfile(
+      cursorX,
+      cursorX + rendered.width,
+      Math.max(wordY, rendered.endBaselineY)
+    )
+
+    const rSpace = seededRand(config.seed + tIdx * 109)
+    const isSentenceEnd = /[.!?]["')]*$/.test(token.raw)
+    const isClausePause = /[,;:—-]$/.test(token.raw)
+    const baseWordSpace =
+      config.fontSizePx *
+      (0.38 +
+        rSpace * 0.28 +
+        (isSentenceEnd ? 0.28 : isClausePause ? 0.14 : 0))
+
+    const stepDx = rendered.width + baseWordSpace
+    cursorX += stepDx
+    advanceSentenceDrift(stepDx)
+    totalWordsCount++
   }
 
   const activePages = canvases.slice(0, currentPageIdx + 1)
+  const sentenceSlopesDeg = Array.from(sentenceKinematics.values()).map((k) =>
+    Number(k.slopeDeg.toFixed(2))
+  )
 
   return {
     activePages,
     telemetry: {
       pageCount: activePages.length,
-      totalWords,
-      totalGlyphs,
-      uniqueAllographsCount: usedAllographs.size,
+      totalWords: totalWordsCount,
+      totalGlyphs: totalGlyphsCount,
+      uniqueAllographsCount: usedAllographKeys.size,
       mistakes,
       sentenceSlopesDeg,
       wordSlopesSampleDeg,
-      minCharHeightRatio: Number(telemetryBounds.minH.toFixed(2)),
-      maxCharHeightRatio: Number(telemetryBounds.maxH.toFixed(2)),
+      minCharHeightRatio: Number(minHeightSeen.toFixed(2)),
+      maxCharHeightRatio: Number(maxHeightSeen.toFixed(2)),
     },
   }
 }

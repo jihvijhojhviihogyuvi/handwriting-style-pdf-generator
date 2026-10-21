@@ -1,724 +1,528 @@
 /**
- * 20-Allograph Per Character Human Handwriting Synthesis Engine
+ * Chirograph 20-Allograph Handwriting Synthesis Engine
  *
- * Generates 20 genuinely distinct structural versions (variantIndex 0..19) for every
- * lowercase letter (a-z), capital letter (A-Z), digit (0-9), and punctuation mark.
- *
- * Combines:
- * 1. Optically auto-calibrated multi-skeleton human letterforms (normalized by measured pixel x-height
- *    so different allograph topologies—open vs closed 'a', looped vs straight 'd'/'l'/'g'/'y',
- *    curved vs pointed 'M'/'N'/'A'/'W', barred vs unbarred 'I'/'J'/'7'/'z'—blend seamlessly as one writer)
- * 2. Smooth 1px sub-pixel 2-pass Non-Linear Mesh Displacement Warping:
- *    - Pass 1 (Horizontal Scanlines): independent upper-ascender bend, middle-bowl pinch/flare,
- *      and lower-descender hook sweep.
- *    - Pass 2 (Vertical Columns): internal left-to-right arch slope, harmonic bow, and
- *      left-vs-right stem height taper.
- * 3. Structural Stroke Surgery across the 20 variants:
- *    - 20 distinct ballpoint tittles (dots/flicks/ticks/loops) on 'i', 'j'
- *    - Dynamic crossbars on 't', 'f', 'T', 'F', 'I', 'J', 'Z', '7'
- *    - Contextual entry hooks and trailing pen-lift exit flicks
- * 4. Ballpoint paste-ink physics: pressure modulation and ink pooling beads at stroke reversals.
+ * Synthesizes 20 distinct, organic allograph variations (0..19) for every
+ * lowercase (a-z) and capital (A-Z) letter, plus digits and punctuation.
  */
 
 export type HandStyleId =
   | 'everyday-ballpoint'
-  | 'rushed-student'
-  | 'casual-journal'
-  | 'messy-scrawl'
+  | 'rushed-lecture'
+  | 'casual-notebook'
+  | 'architect-scrawl'
 
 export type InkColorId =
   | 'bic-blue'
-  | 'carbon-black'
-  | 'pilot-navy'
+  | 'pilot-black'
+  | 'gel-navy'
   | 'graphite-pencil'
-  | 'crimson-ink'
+  | 'red-grading'
+
+export interface HandStyleConfig {
+  id: HandStyleId
+  name: string
+  subtitle: string
+  fontPool: string[]
+  fontScaleFactors: number[]
+  baseSlantDeg: number
+  slantSpreadDeg: number
+  heightSpread: number
+  widthSpread: number
+  baselineJitterPx: number
+  warpIntensity: number
+  kerningTightness: number
+  ligatureRate: number
+}
 
 export interface InkPalette {
   id: InkColorId
   name: string
-  primaryHex: string
   rgb: [number, number, number]
   poolRgb: [number, number, number]
-  dryAlpha: number
+  swatchHex: string
   wetAlpha: number
+  dryStreakChance: number
+}
+
+export const HAND_STYLES: Record<HandStyleId, HandStyleConfig> = {
+  'everyday-ballpoint': {
+    id: 'everyday-ballpoint',
+    name: 'Everyday Ballpoint Hybrid',
+    subtitle: 'Natural cursive-print mix with fluid rhythm & connected pairs',
+    fontPool: ['"Caveat"', '"Caveat"', '"Kalam"', '"Caveat"', '"Patrick Hand"'],
+    fontScaleFactors: [1.0, 1.03, 0.85, 0.97, 0.89],
+    baseSlantDeg: 4.5,
+    slantSpreadDeg: 10.5,
+    heightSpread: 0.19,
+    widthSpread: 0.17,
+    baselineJitterPx: 2.7,
+    warpIntensity: 1.22,
+    kerningTightness: 0.84,
+    ligatureRate: 0.46,
+  },
+  'rushed-lecture': {
+    id: 'rushed-lecture',
+    name: 'Rushed Lecture / Exam Hand',
+    subtitle: 'Fast, angular ballpoint note-taking under time pressure',
+    fontPool: ['"Caveat"', '"Shadows Into Light"', '"Caveat"', '"Shadows Into Light"'],
+    fontScaleFactors: [1.0, 0.90, 1.04, 0.92],
+    baseSlantDeg: 9.0,
+    slantSpreadDeg: 12.5,
+    heightSpread: 0.23,
+    widthSpread: 0.19,
+    baselineJitterPx: 3.5,
+    warpIntensity: 1.42,
+    kerningTightness: 0.85,
+    ligatureRate: 0.54,
+  },
+  'casual-notebook': {
+    id: 'casual-notebook',
+    name: 'Casual Everyday Notebook',
+    subtitle: 'Warm, unpretentious semi-printed desk notes',
+    fontPool: ['"Kalam"', '"Kalam"', '"Patrick Hand"', '"Caveat"'],
+    fontScaleFactors: [0.88, 0.85, 0.91, 1.0],
+    baseSlantDeg: 2.0,
+    slantSpreadDeg: 8.5,
+    heightSpread: 0.17,
+    widthSpread: 0.15,
+    baselineJitterPx: 2.3,
+    warpIntensity: 1.05,
+    kerningTightness: 0.86,
+    ligatureRate: 0.36,
+  },
+  'architect-scrawl': {
+    id: 'architect-scrawl',
+    name: 'Late-Night Hurried Scrawl',
+    subtitle: 'High-entropy, fatigued handwriting with steep drift & bounce',
+    fontPool: ['"Caveat"', '"Shadows Into Light"', '"Caveat"', '"Kalam"'],
+    fontScaleFactors: [1.02, 0.91, 0.96, 0.85],
+    baseSlantDeg: 6.5,
+    slantSpreadDeg: 14.0,
+    heightSpread: 0.26,
+    widthSpread: 0.22,
+    baselineJitterPx: 4.2,
+    warpIntensity: 1.56,
+    kerningTightness: 0.84,
+    ligatureRate: 0.50,
+  },
 }
 
 export const INK_PALETTES: Record<InkColorId, InkPalette> = {
   'bic-blue': {
     id: 'bic-blue',
-    name: 'Bic Cristal Blue (0.7mm)',
-    primaryHex: '#1b3b8c',
-    rgb: [27, 59, 140],
-    poolRgb: [14, 32, 92],
-    dryAlpha: 0.82,
-    wetAlpha: 0.97,
+    name: 'Bic Cristal Blue',
+    rgb: [25, 52, 126],
+    poolRgb: [10, 24, 78],
+    swatchHex: '#19347e',
+    wetAlpha: 0.93,
+    dryStreakChance: 0.34,
   },
-  'carbon-black': {
-    id: 'carbon-black',
+  'pilot-black': {
+    id: 'pilot-black',
     name: 'Ballpoint Carbon Black',
-    primaryHex: '#1e2128',
-    rgb: [30, 33, 40],
-    poolRgb: [10, 12, 16],
-    dryAlpha: 0.84,
-    wetAlpha: 0.98,
+    rgb: [30, 32, 37],
+    poolRgb: [12, 13, 17],
+    swatchHex: '#1e2025',
+    wetAlpha: 0.94,
+    dryStreakChance: 0.28,
   },
-  'pilot-navy': {
-    id: 'pilot-navy',
-    name: 'Gel Roller Blue-Black (0.5mm)',
-    primaryHex: '#15294a',
-    rgb: [21, 41, 74],
-    poolRgb: [8, 18, 38],
-    dryAlpha: 0.86,
-    wetAlpha: 0.98,
+  'gel-navy': {
+    id: 'gel-navy',
+    name: 'Gel Roller Blue-Black',
+    rgb: [20, 39, 68],
+    poolRgb: [8, 19, 38],
+    swatchHex: '#142744',
+    wetAlpha: 0.96,
+    dryStreakChance: 0.16,
   },
   'graphite-pencil': {
     id: 'graphite-pencil',
     name: 'HB Mechanical Graphite',
-    primaryHex: '#464950',
-    rgb: [70, 73, 80],
-    poolRgb: [42, 45, 50],
-    dryAlpha: 0.72,
-    wetAlpha: 0.9,
+    rgb: [68, 71, 77],
+    poolRgb: [42, 44, 49],
+    swatchHex: '#44474d',
+    wetAlpha: 0.83,
+    dryStreakChance: 0.52,
   },
-  'crimson-ink': {
-    id: 'crimson-ink',
+  'red-grading': {
+    id: 'red-grading',
     name: 'Red Margin Ballpoint',
-    primaryHex: '#9e2424',
-    rgb: [158, 36, 36],
-    poolRgb: [105, 14, 14],
-    dryAlpha: 0.8,
-    wetAlpha: 0.96,
+    rgb: [148, 32, 34],
+    poolRgb: [96, 14, 16],
+    swatchHex: '#942022',
+    wetAlpha: 0.92,
+    dryStreakChance: 0.32,
   },
 }
 
-interface FontSkeletonSpec {
-  family: string
-  weight: number
-  opticalScale: number
-  baselineShift: number
-  letterWidthFactor: number
-}
-
-export interface HandStyleSpec {
-  id: HandStyleId
-  name: string
-  description: string
-  baseSlantDeg: number
-  strokeWeight: number
-  ligatureRate: number
-  skeletons: FontSkeletonSpec[]
-}
-
-export const HAND_STYLES: Record<HandStyleId, HandStyleSpec> = {
-  'everyday-ballpoint': {
-    id: 'everyday-ballpoint',
-    name: 'Everyday Ballpoint Hybrid',
-    description: 'Natural cursive-print mix with fluid loops, flying crossbars, and organic speed shifts',
-    baseSlantDeg: 3.8,
-    strokeWeight: 1.0,
-    ligatureRate: 0.34,
-    skeletons: [
-      { family: 'Caveat', weight: 500, opticalScale: 1.08, baselineShift: 0, letterWidthFactor: 0.96 },
-      { family: 'Caveat', weight: 400, opticalScale: 1.07, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'Kalam', weight: 300, opticalScale: 0.82, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'Caveat', weight: 600, opticalScale: 1.06, baselineShift: 0, letterWidthFactor: 0.96 },
-      { family: 'Handlee', weight: 400, opticalScale: 0.84, baselineShift: 0, letterWidthFactor: 0.94 },
-      { family: 'Shadows Into Light Two', weight: 400, opticalScale: 0.85, baselineShift: 0, letterWidthFactor: 0.94 },
-      { family: 'Patrick Hand', weight: 400, opticalScale: 0.88, baselineShift: 0, letterWidthFactor: 0.94 },
-    ],
-  },
-  'rushed-student': {
-    id: 'rushed-student',
-    name: 'Rushed Lecture / Exam Hand',
-    description: 'Fast, angular ballpoint note-taking with variable heights, hurried tails, and sharp slant',
-    baseSlantDeg: 6.5,
-    strokeWeight: 0.95,
-    ligatureRate: 0.42,
-    skeletons: [
-      { family: 'Nothing You Could Do', weight: 400, opticalScale: 0.82, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'Caveat', weight: 500, opticalScale: 1.08, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'Covered By Your Grace', weight: 400, opticalScale: 0.96, baselineShift: 0, letterWidthFactor: 0.94 },
-      { family: 'Shadows Into Light Two', weight: 400, opticalScale: 0.86, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'La Belle Aurore', weight: 400, opticalScale: 0.88, baselineShift: 0, letterWidthFactor: 0.95 },
-    ],
-  },
-  'casual-journal': {
-    id: 'casual-journal',
-    name: 'Casual Everyday Notebook',
-    description: 'Warm, unpretentious semi-printed handwriting with bouncy x-heights and open bowls',
-    baseSlantDeg: 2.2,
-    strokeWeight: 1.04,
-    ligatureRate: 0.25,
-    skeletons: [
-      { family: 'Kalam', weight: 400, opticalScale: 0.84, baselineShift: 0, letterWidthFactor: 0.96 },
-      { family: 'Kalam', weight: 300, opticalScale: 0.86, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'Patrick Hand', weight: 400, opticalScale: 0.92, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'Handlee', weight: 400, opticalScale: 0.86, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'Indie Flower', weight: 400, opticalScale: 0.88, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'Architects Daughter', weight: 400, opticalScale: 0.8, baselineShift: 0, letterWidthFactor: 0.95 },
-    ],
-  },
-  'messy-scrawl': {
-    id: 'messy-scrawl',
-    name: 'Late-Night Hurried Scrawl',
-    description: 'High-entropy, fatigued handwriting with dramatic ascenders, heavy cross-outs, and steep drift',
-    baseSlantDeg: 8.0,
-    strokeWeight: 0.94,
-    ligatureRate: 0.48,
-    skeletons: [
-      { family: 'Covered By Your Grace', weight: 400, opticalScale: 0.98, baselineShift: 0, letterWidthFactor: 0.94 },
-      { family: 'Caveat', weight: 500, opticalScale: 1.08, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'La Belle Aurore', weight: 400, opticalScale: 0.9, baselineShift: 0, letterWidthFactor: 0.95 },
-      { family: 'Zeyada', weight: 400, opticalScale: 1.04, baselineShift: 1, letterWidthFactor: 0.94 },
-      { family: 'Nothing You Could Do', weight: 400, opticalScale: 0.84, baselineShift: 0, letterWidthFactor: 0.94 },
-    ],
-  },
-}
-
-function hashPair(a: number, b: number, c = 0): number {
-  let h = (a * 374761393 + b * 668265263 + c * 2147483647) | 0
-  h = ((h ^ (h >> 13)) * 1274126177) | 0
-  return ((h ^ (h >> 16)) >>> 0) / 4294967295
-}
-
-export interface AllographVariantDescriptor {
-  variantIndex: number // 0 .. 19
-  skeletonIndex: number
-  // Pass 1: Smooth Horizontal scanline warp parameters
-  topBendPx: number
-  bellyShiftPx: number
-  descenderSweepPx: number
-  topFlareX: number
-  bottomPinchX: number
-  slantShear: number
-  // Pass 2: Smooth Vertical column warp parameters
-  internalSlopePx: number
-  archBowPx: number
-  sWavePx: number
-  rightTaperY: number
-  // Overall variant proportion
+export interface AllographDescriptor {
+  char: string
+  variantIndex: number // 0..19
+  fontFamily: string
+  fontScaleFactor: number
+  fontWeight: number
   aspectScaleX: number
   aspectScaleY: number
+  slantShear: number
   rotationRad: number
-  // Structural stroke surgery
-  tittleOffsetX: number
-  tittleOffsetY: number
-  tittleStyle: 'dot' | 'flick-right' | 'tick-down' | 'micro-loop' | 'dash'
-  crossbarAngleRad: number
-  crossbarOffsetY: number
-  crossbarLengthScale: number
-  hasCapitalSerifs: boolean // For 'I', 'J', 'z', '7' allograph switching
-  // Entry / exit ligature tendrils
-  hasEntryHook: boolean
-  entryHookDy: number
-  hasExitFlick: boolean
-  exitFlickLength: number
-  exitFlickSlope: number
-  // Ink pressure & ballpoint physics
+  baselineShiftPx: number
+  internalSlopePx: number
+  topBendPx: number
+  bottomBendPx: number
+  waistPinchPx: number
+  bowlInflation: number
   pressureWeight: number
-  inkPoolStrength: number
+  warpPhaseX: number
+  warpPhaseY: number
+  warpAmpX: number
+  warpAmpY: number
+  hasEntryLead: boolean
+  hasExitFlick: boolean
+  tCrossbarTilt: number
+  tCrossbarYOffset: number
+  iDotOffsetX: number
+  iDotOffsetY: number
+}
+
+export interface SynthesizedAllograph {
+  canvas: HTMLCanvasElement
+  descriptor: AllographDescriptor
+  advanceWidth: number
+  baselineY: number
+  anchorX: number
+}
+
+function hashCharVariant(char: string, variantIndex: number, salt: number): number {
+  let h = 2166136261 ^ salt
+  for (let i = 0; i < char.length; i++) {
+    h ^= char.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  h ^= (variantIndex + 1) * 0x9e3779b9
+  h = Math.imul(h, 16777619)
+  return (h >>> 0) / 4294967295
 }
 
 export function getAllographDescriptor(
   char: string,
   variantIndex: number,
   styleId: HandStyleId
-): AllographVariantDescriptor {
-  const code = char.charCodeAt(0)
-  const v = ((variantIndex % 20) + 20) % 20
+): AllographDescriptor {
   const style = HAND_STYLES[styleId]
+  const v = ((variantIndex % 20) + 20) % 20
 
-  const phi1 = ((v * 0.61803398875 + hashPair(code, 1, v)) % 1) * 2 - 1
-  const phi2 = ((v * 0.38196601125 + hashPair(code, 2, v)) % 1) * 2 - 1
-  const phi3 = ((v * 0.75487766624 + hashPair(code, 3, v)) % 1) * 2 - 1
-  const phi4 = ((v * 0.56984029099 + hashPair(code, 4, v)) % 1) * 2 - 1
-  const phi5 = hashPair(code, 5, v) * 2 - 1
-  const phi6 = hashPair(code, 6, v) * 2 - 1
-  const phi7 = hashPair(code, 7, v)
+  const r1 = hashCharVariant(char, v, 101)
+  const r2 = hashCharVariant(char, v, 203)
+  const r3 = hashCharVariant(char, v, 307)
+  const r4 = hashCharVariant(char, v, 409)
+  const r5 = hashCharVariant(char, v, 521)
+  const r6 = hashCharVariant(char, v, 631)
+  const r7 = hashCharVariant(char, v, 743)
+  const r8 = hashCharVariant(char, v, 859)
+  const r9 = hashCharVariant(char, v, 971)
 
-  // Cycle across the style's calibrated human skeletons so the 20 variants exhibit
-  // genuine structural allograph diversity (open vs closed bowls, looped vs straight stems)
-  const skeletonIndex = (v + (code % 3)) % style.skeletons.length
+  const poolIdx = v % style.fontPool.length
+  const fontFamily = style.fontPool[poolIdx]
+  const fontScaleFactor = style.fontScaleFactors[poolIdx] ?? 1.0
+  const weights = [400, 500, 600, 400, 500]
+  const fontWeight = weights[Math.floor(v / 4) % weights.length]
+
+  const golden1 = ((v * 0.61803398875 + r1 * 0.22) % 1) - 0.5
+  const golden2 = ((v * 0.38196601125 + r2 * 0.22) % 1) - 0.5
+  const golden3 = ((v * 0.75487766625 + r3 * 0.22) % 1) - 0.5
 
   const isUpper = char >= 'A' && char <= 'Z'
-  const hasAscender = /[bdkhltfA-Z0-9]/.test(char)
-  const hasDescender = /[gjpqyfzQJY]/.test(char)
+  const heightMult = isUpper ? 1.16 : 1.06
 
-  const topBendPx = (hasAscender ? 4.4 : 2.5) * phi1
-  const bellyShiftPx = 2.4 * phi2
-  const descenderSweepPx = (hasDescender ? 5.6 : 2.4) * phi3
+  const aspectScaleY = Math.max(
+    0.80,
+    Math.min(1.24, 1.0 + golden1 * style.heightSpread * 2.2 * heightMult)
+  )
+  const aspectScaleX = Math.max(
+    0.83,
+    Math.min(1.22, 1.0 + golden2 * style.widthSpread * 2.1)
+  )
 
-  const topFlareX = 0.14 * phi2
-  const bottomPinchX = -0.13 * phi3
-  const slantShear = (style.baseSlantDeg * Math.PI) / 180 + 0.16 * phi1
+  const slantDeg = style.baseSlantDeg + golden3 * style.slantSpreadDeg * 2.1
+  const slantShear = -Math.tan((slantDeg * Math.PI) / 180)
+  const rotationRad = (((r4 - 0.5) * 7.5 + golden1 * 2.8) * Math.PI) / 180
 
-  const internalSlopePx = 2.5 * phi4
-  const archBowPx = 1.8 * phi5
-  const sWavePx = 1.3 * phi6
-  const rightTaperY = 0.15 * phi3
+  const baselineShiftPx = (r5 - 0.48) * style.baselineJitterPx * 2.1
+  const internalSlopePx = (r6 - 0.46) * 4.8 + golden2 * 2.8
 
-  const aspectScaleX = 0.97 + 0.15 * phi2
-  const aspectScaleY = (isUpper ? 1.05 : 1.0) + 0.17 * phi4
-  const rotationRad = 0.075 * phi5
+  const topBendPx = ((r7 - 0.5) * 8.2 + golden1 * 4.6) * style.warpIntensity
+  const bottomBendPx = ((r8 - 0.5) * 7.8 - golden2 * 4.2) * style.warpIntensity
+  const waistPinchPx = (r9 - 0.5) * 4.2 * style.warpIntensity
+  const bowlInflation = golden3 * 0.56 + (r3 - 0.5) * 0.26
 
-  const tittleStyles: AllographVariantDescriptor['tittleStyle'][] = [
-    'dot',
-    'flick-right',
-    'tick-down',
-    'micro-loop',
-    'dash',
-  ]
-  const tittleStyle = tittleStyles[(v + code) % tittleStyles.length]
-  const tittleOffsetX = 1.5 + 6.0 * phi1
-  const tittleOffsetY = -1.0 + 4.2 * phi2
+  const pressureWeight = 0.85 + (v % 5) * 0.06 + (r7 - 0.5) * 0.12
 
-  const crossbarAngleRad = 0.04 + 0.22 * phi3
-  const crossbarOffsetY = 3.5 * phi4
-  const crossbarLengthScale = 1.02 + 0.3 * phi1
-  const hasCapitalSerifs = v % 3 === 0
+  const warpPhaseX = r8 * Math.PI * 2
+  const warpPhaseY = r9 * Math.PI * 2
+  const warpAmpX = (0.85 + r1 * 1.05) * style.warpIntensity
+  const warpAmpY = (0.80 + r2 * 0.95) * style.warpIntensity
 
-  const hasEntryHook =
-    /[a-z]/.test(char) && phi7 < style.ligatureRate * 0.55 && v % 3 === 0
-  const entryHookDy = 2.4 + 3.0 * Math.abs(phi2)
+  const hasEntryLead = v % 3 === 0 && char >= 'a' && char <= 'z'
+  const hasExitFlick = v % 2 === 1 && ((char >= 'a' && char <= 'z') || isUpper)
 
-  const hasExitFlick =
-    /[adehilmnorstuvwyz]/.test(char) &&
-    ((v + code) % 20 < Math.round(style.ligatureRate * 15))
-  const exitFlickLength = 4.5 + 7.0 * Math.abs(phi3)
-  const exitFlickSlope = -0.28 + 0.36 * phi4
-
-  const pressureWeight = 0.96 + 0.15 * phi6
-  const inkPoolStrength = 0.28 + 0.48 * phi7
+  const tCrossbarTilt = (r3 - 0.45) * 0.34
+  const tCrossbarYOffset = (r4 - 0.5) * 5.2
+  const iDotOffsetX = (r5 - 0.35) * 6.5
+  const iDotOffsetY = (r6 - 0.5) * 4.8
 
   return {
+    char,
     variantIndex: v,
-    skeletonIndex,
-    topBendPx,
-    bellyShiftPx,
-    descenderSweepPx,
-    topFlareX,
-    bottomPinchX,
-    slantShear,
-    internalSlopePx,
-    archBowPx,
-    sWavePx,
-    rightTaperY,
+    fontFamily,
+    fontScaleFactor,
+    fontWeight,
     aspectScaleX,
     aspectScaleY,
+    slantShear,
     rotationRad,
-    tittleOffsetX,
-    tittleOffsetY,
-    tittleStyle,
-    crossbarAngleRad,
-    crossbarOffsetY,
-    crossbarLengthScale,
-    hasCapitalSerifs,
-    hasEntryHook,
-    entryHookDy,
-    hasExitFlick,
-    exitFlickLength,
-    exitFlickSlope,
+    baselineShiftPx,
+    internalSlopePx,
+    topBendPx,
+    bottomBendPx,
+    waistPinchPx,
+    bowlInflation,
     pressureWeight,
-    inkPoolStrength,
+    warpPhaseX,
+    warpPhaseY,
+    warpAmpX,
+    warpAmpY,
+    hasEntryLead,
+    hasExitFlick,
+    tCrossbarTilt,
+    tCrossbarYOffset,
+    iDotOffsetX,
+    iDotOffsetY,
   }
 }
 
-export interface CachedAllographGlyph {
-  canvas: HTMLCanvasElement
-  advanceWidth: number
-  anchorX: number
-  baselineY: number
-  descriptor: AllographVariantDescriptor
-}
-
-const glyphCache = new Map<string, CachedAllographGlyph>()
+const allographCache = new Map<string, SynthesizedAllograph>()
 
 export function clearAllographCache() {
-  glyphCache.clear()
-}
-
-let scratchA: HTMLCanvasElement | null = null
-let scratchB: HTMLCanvasElement | null = null
-
-function getScratchCanvases(w: number, h: number) {
-  if (typeof document === 'undefined') {
-    throw new Error('Allograph synthesis requires browser canvas environment')
-  }
-  if (!scratchA) {
-    scratchA = document.createElement('canvas')
-    scratchB = document.createElement('canvas')
-  }
-  if (scratchA.width !== w || scratchA.height !== h) {
-    scratchA.width = w
-    scratchA.height = h
-  }
-  if (scratchB!.width !== w || scratchB!.height !== h) {
-    scratchB!.width = w
-    scratchB!.height = h
-  }
-  return { a: scratchA, b: scratchB! }
-}
-
-function drawBallpointStroke(
-  ctx: CanvasRenderingContext2D,
-  x0: number,
-  y0: number,
-  cx: number,
-  cy: number,
-  x1: number,
-  y1: number,
-  thickness: number,
-  palette: InkPalette,
-  poolStrength: number
-) {
-  const steps = 12
-  const [r, g, b] = palette.rgb
-  const [pr, pg, pb] = palette.poolRgb
-
-  for (let i = 0; i < steps; i++) {
-    const t0 = i / steps
-    const t1 = (i + 1) / steps
-    const mt0 = 1 - t0
-    const mt1 = 1 - t1
-
-    const px0 = mt0 * mt0 * x0 + 2 * mt0 * t0 * cx + t0 * t0 * x1
-    const py0 = mt0 * mt0 * y0 + 2 * mt0 * t0 * cy + t0 * t0 * y1
-    const px1 = mt1 * mt1 * x0 + 2 * mt1 * t1 * cx + t1 * t1 * x1
-    const py1 = mt1 * mt1 * y0 + 2 * mt1 * t1 * cy + t1 * t1 * y1
-
-    const pressure = Math.sin(t0 * Math.PI * 0.85 + 0.15)
-    const w = Math.max(0.8, thickness * (0.6 + 0.55 * pressure))
-    const alpha = palette.dryAlpha + (palette.wetAlpha - palette.dryAlpha) * pressure
-
-    ctx.beginPath()
-    ctx.moveTo(px0, py0)
-    ctx.lineTo(px1, py1)
-    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(3)})`
-    ctx.lineWidth = w
-    ctx.lineCap = 'round'
-    ctx.stroke()
-  }
-
-  if (poolStrength > 0.4) {
-    ctx.beginPath()
-    ctx.arc(x0, y0, thickness * 0.52, 0, Math.PI * 2)
-    ctx.fillStyle = `rgba(${pr}, ${pg}, ${pb}, ${(0.38 * poolStrength).toFixed(3)})`
-    ctx.fill()
-  }
+  allographCache.clear()
 }
 
 export function getOrSynthesizeAllograph(
   char: string,
   variantIndex: number,
   styleId: HandStyleId,
-  inkColorId: InkColorId,
-  baseFontSizePx = 48
-): CachedAllographGlyph {
+  inkId: InkColorId,
+  baseFontSizePx: number
+): SynthesizedAllograph {
   const v = ((variantIndex % 20) + 20) % 20
-  const cacheKey = `${styleId}:${inkColorId}:${baseFontSizePx}:${char}:${v}`
-  const existing = glyphCache.get(cacheKey)
-  if (existing) {
-    return existing
-  }
+  const quantizedSize = Math.round(baseFontSizePx)
+  const cacheKey = `${styleId}:${inkId}:${quantizedSize}:${char}:${v}`
 
-  const style = HAND_STYLES[styleId]
-  const palette = INK_PALETTES[inkColorId]
+  const existing = allographCache.get(cacheKey)
+  if (existing) return existing
+
   const desc = getAllographDescriptor(char, v, styleId)
-  const skel = style.skeletons[desc.skeletonIndex]
+  const style = HAND_STYLES[styleId]
+  const palette = INK_PALETTES[inkId]
 
-  const W = Math.round(baseFontSizePx * 2.2)
-  const H = Math.round(baseFontSizePx * 2.6)
-  const anchorX = Math.round(W * 0.35)
-  const baselineY = Math.round(H * 0.62)
+  const pad = Math.ceil(quantizedSize * 0.85)
+  const cW = Math.ceil(quantizedSize * 1.95) + pad
+  const cH = Math.ceil(quantizedSize * 2.45) + pad
+  const anchorX = Math.round(cW * 0.34)
+  const baselineY = Math.round(cH * 0.62)
 
-  const { a: canvasA, b: canvasB } = getScratchCanvases(W, H)
-  const ctxA = canvasA.getContext('2d')!
-  const ctxB = canvasB.getContext('2d')!
+  const srcCanvas = document.createElement('canvas')
+  srcCanvas.width = cW
+  srcCanvas.height = cH
+  const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true })!
 
-  ctxA.clearRect(0, 0, W, H)
-  ctxB.clearRect(0, 0, W, H)
-
-  const scaledFontPx = Math.round(
-    baseFontSizePx * skel.opticalScale * desc.pressureWeight
+  srcCtx.save()
+  srcCtx.translate(anchorX, baselineY)
+  srcCtx.transform(
+    desc.aspectScaleX,
+    (desc.internalSlopePx / quantizedSize) * 0.48,
+    desc.slantShear * 0.56,
+    desc.aspectScaleY,
+    0,
+    0
   )
-  const fontSpec = `${skel.weight} ${scaledFontPx}px "${skel.family}", cursive, sans-serif`
-  ctxA.font = fontSpec
-  ctxA.textBaseline = 'alphabetic'
 
-  const metrics = ctxA.measureText(char)
-  const rawAdvance = Math.max(
-    baseFontSizePx * 0.27,
-    metrics.width * skel.letterWidthFactor * desc.aspectScaleX
-  )
+  const calibratedFontSize = Math.round(quantizedSize * desc.fontScaleFactor)
+  srcCtx.font = `${desc.fontWeight} ${calibratedFontSize}px ${desc.fontFamily}, cursive`
+  srcCtx.textBaseline = 'alphabetic'
+
+  const metrics = srcCtx.measureText(char)
+  const rawAdvance = Math.max(quantizedSize * 0.22, metrics.width)
 
   const [r, g, b] = palette.rgb
-  const [pr, pg, pb] = palette.poolRgb
-  const baseAlpha =
-    palette.dryAlpha +
-    (palette.wetAlpha - palette.dryAlpha) *
-      Math.min(1, Math.max(0, (desc.pressureWeight - 0.82) / 0.35))
 
-  ctxA.save()
-  ctxA.translate(anchorX, baselineY + skel.baselineShift)
-  ctxA.scale(desc.aspectScaleX, desc.aspectScaleY)
-  ctxA.fillStyle = `rgba(${r}, ${g}, ${b}, ${baseAlpha.toFixed(3)})`
-  ctxA.fillText(char, 0, 0)
+  srcCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${palette.wetAlpha})`
+  srcCtx.fillText(char, 0, 0)
 
-  if (desc.pressureWeight > 1.02) {
-    ctxA.fillStyle = `rgba(${pr}, ${pg}, ${pb}, ${(0.22 * desc.inkPoolStrength).toFixed(3)})`
-    ctxA.fillText(char, 0.35, 0.25)
+  const needsNibBoost =
+    desc.fontFamily.includes('Shadows') ||
+    desc.fontFamily.includes('Patrick') ||
+    desc.pressureWeight > 0.96
+
+  if (needsNibBoost) {
+    srcCtx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.44)`
+    srcCtx.fillText(char, 0.45, 0.18)
   }
-  ctxA.restore()
 
-  // SURGERY 1: Dynamic tittles on 'i' and 'j' across 20 variants
-  if (char === 'i' || char === 'j') {
-    const cutY = baselineY - Math.round(baseFontSizePx * 0.42)
-    ctxA.clearRect(0, 0, W, Math.max(0, cutY))
+  srcCtx.restore()
 
-    const dotX =
-      anchorX +
-      rawAdvance * 0.48 +
-      desc.tittleOffsetX * (baseFontSizePx / 48)
-    const dotY =
-      baselineY -
-      baseFontSizePx * 0.54 +
-      desc.tittleOffsetY * (baseFontSizePx / 48)
-    const strokeThick = Math.max(1.8, (baseFontSizePx / 22) * style.strokeWeight)
+  const dstCanvas = document.createElement('canvas')
+  dstCanvas.width = cW
+  dstCanvas.height = cH
+  const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true })!
 
-    ctxA.save()
-    if (desc.tittleStyle === 'dot') {
-      ctxA.beginPath()
-      ctxA.ellipse(
-        dotX,
-        dotY,
-        strokeThick * 0.75,
-        strokeThick * 0.6,
-        desc.rotationRad * 2,
-        0,
-        Math.PI * 2
-      )
-      ctxA.fillStyle = `rgba(${pr}, ${pg}, ${pb}, ${palette.wetAlpha})`
-      ctxA.fill()
-    } else if (desc.tittleStyle === 'flick-right') {
-      drawBallpointStroke(
-        ctxA,
-        dotX - 1.2,
-        dotY + 1.5,
-        dotX + 1.5,
-        dotY - 0.8,
-        dotX + 5.0,
-        dotY - 2.8,
-        strokeThick * 0.85,
-        palette,
-        desc.inkPoolStrength
-      )
-    } else if (desc.tittleStyle === 'tick-down') {
-      drawBallpointStroke(
-        ctxA,
-        dotX - 0.8,
-        dotY - 2.5,
-        dotX + 0.5,
-        dotY,
-        dotX + 2.0,
-        dotY + 2.8,
-        strokeThick * 0.88,
-        palette,
-        desc.inkPoolStrength
-      )
-    } else if (desc.tittleStyle === 'micro-loop') {
-      ctxA.beginPath()
-      ctxA.arc(dotX, dotY, strokeThick * 0.78, 0.2, Math.PI * 1.9)
-      ctxA.strokeStyle = `rgba(${r}, ${g}, ${b}, ${baseAlpha})`
-      ctxA.lineWidth = strokeThick * 0.68
-      ctxA.stroke()
+  const srcImg = srcCtx.getImageData(0, 0, cW, cH)
+  const dstImg = dstCtx.createImageData(cW, cH)
+  const sData = srcImg.data
+  const dData = dstImg.data
+
+  const freqX = (Math.PI * 2) / Math.max(22, quantizedSize * 0.72)
+  const freqY = (Math.PI * 2) / Math.max(22, quantizedSize * 0.68)
+  const streakSeed = hashCharVariant(char, v, 991)
+
+  const bowlCenterX = anchorX + rawAdvance * 0.48
+  const bowlCenterY = baselineY - quantizedSize * 0.22
+  const bowlRadius = quantizedSize * 0.42
+
+  for (let y = 1; y < cH - 1; y++) {
+    const normY = (y - baselineY) / (quantizedSize * 0.75)
+
+    let bendX = 0
+    if (normY < -0.15) {
+      const t = Math.min(1.4, Math.abs(normY + 0.15))
+      bendX = desc.topBendPx * t * t * 0.85
+    } else if (normY > 0.12) {
+      const t = Math.min(1.4, normY - 0.12)
+      bendX = desc.bottomBendPx * t * t * 0.85
     } else {
-      drawBallpointStroke(
-        ctxA,
-        dotX - 2.5,
-        dotY,
-        dotX + 0.8,
-        dotY - 0.6,
-        dotX + 4.5,
-        dotY + 0.4,
-        strokeThick * 0.82,
-        palette,
-        desc.inkPoolStrength
-      )
+      bendX = desc.waistPinchPx * (1 - Math.abs(normY) * 2.8)
     }
-    ctxA.restore()
-  }
 
-  // SURGERY 2: Dynamic crossbar variations on 't', 'f', 'T', '7', 'z', 'I', 'J'
-  const strokeThick = Math.max(1.6, (baseFontSizePx / 24) * style.strokeWeight)
-  if ((char === 't' || char === 'f' || char === 'T' || char === '7' || char === 'z') && v % 2 === 1) {
-    const barY =
-      char === 'T'
-        ? baselineY - baseFontSizePx * 0.66 + desc.crossbarOffsetY * 0.5
-        : char === '7' || char === 'z'
-          ? baselineY - baseFontSizePx * 0.31 + desc.crossbarOffsetY * 0.4
-          : baselineY - baseFontSizePx * 0.43 + desc.crossbarOffsetY * 0.75
-    const barHalfLen = baseFontSizePx * 0.21 * desc.crossbarLengthScale
-    const centerBarX = anchorX + rawAdvance * 0.5 + desc.bellyShiftPx
-    const dyBar = Math.tan(desc.crossbarAngleRad) * barHalfLen
+    const rowWaveX = Math.sin(y * freqY + desc.warpPhaseX) * desc.warpAmpX * 0.68
 
-    drawBallpointStroke(
-      ctxA,
-      centerBarX - barHalfLen * 0.7,
-      barY + dyBar * 0.7,
-      centerBarX + barHalfLen * 0.1,
-      barY - desc.archBowPx * 0.4,
-      centerBarX + barHalfLen * 1.1,
-      barY - dyBar * 1.1,
-      strokeThick * 0.82,
-      palette,
-      desc.inkPoolStrength
-    )
-  }
+    for (let x = 1; x < cW - 1; x++) {
+      const dxB = x - bowlCenterX
+      const dyB = y - bowlCenterY
+      const distSq = dxB * dxB + dyB * dyB
+      let bowlDx = 0
+      let bowlDy = 0
+      if (distSq < bowlRadius * bowlRadius) {
+        const factor = (1 - Math.sqrt(distSq) / bowlRadius) * desc.bowlInflation
+        bowlDx = -dxB * factor * 0.62
+        bowlDy = -dyB * factor * 0.55
+      }
 
-  // Capital 'I' and 'J' top/bottom bar allograph switching
-  if ((char === 'I' || char === 'J') && desc.hasCapitalSerifs) {
-    const topY = baselineY - baseFontSizePx * 0.66
-    const centerX = anchorX + rawAdvance * 0.5
-    const barW = baseFontSizePx * 0.17
-    drawBallpointStroke(
-      ctxA,
-      centerX - barW,
-      topY + 1,
-      centerX,
-      topY - 0.5,
-      centerX + barW,
-      topY - 1,
-      strokeThick * 0.82,
-      palette,
-      0.3
-    )
-    if (char === 'I') {
-      drawBallpointStroke(
-        ctxA,
-        centerX - barW * 0.9,
-        baselineY + 0.5,
-        centerX,
-        baselineY - 0.5,
-        centerX + barW * 0.9,
-        baselineY - 0.5,
-        strokeThick * 0.82,
-        palette,
-        0.3
-      )
+      const normX = (x - anchorX) / Math.max(12, rawAdvance)
+      let exitDy = 0
+      if (desc.hasExitFlick && normX > 0.62 && Math.abs(normY) < 0.38) {
+        const rt = Math.min(1.2, (normX - 0.62) * 1.8)
+        exitDy = (v % 4 === 1 ? 1 : -1) * rt * rt * 2.6
+      }
+
+      const colWaveY =
+        Math.cos(x * freqX + desc.warpPhaseY) * desc.warpAmpY * 0.62 +
+        Math.sin((x + y) * 0.16 + desc.warpPhaseX) * 0.32
+
+      const sx = x + bendX + bowlDx + rowWaveX
+      const sy = y + bowlDy + colWaveY + exitDy
+
+      const ix = Math.floor(sx)
+      const iy = Math.floor(sy)
+      if (ix < 0 || ix >= cW - 1 || iy < 0 || iy >= cH - 1) continue
+
+      const fx = sx - ix
+      const fy = sy - iy
+
+      const idx00 = (iy * cW + ix) * 4
+      const idx10 = (iy * cW + (ix + 1)) * 4
+      const idx01 = ((iy + 1) * cW + ix) * 4
+      const idx11 = ((iy + 1) * cW + (ix + 1)) * 4
+
+      const a00 = sData[idx00 + 3]
+      const a10 = sData[idx10 + 3]
+      const a01 = sData[idx01 + 3]
+      const a11 = sData[idx11 + 3]
+
+      if ((a00 | a10 | a01 | a11) === 0) continue
+
+      const aTop = a00 + (a10 - a00) * fx
+      const aBot = a01 + (a11 - a01) * fx
+      let alpha = aTop + (aBot - aTop) * fy
+
+      if (alpha < 8) continue
+
+      const microGrain =
+        Math.sin(x * 1.45 + y * 1.85 + streakSeed * 29) *
+        Math.cos(x * 0.85 - y * 1.35 + streakSeed * 17)
+
+      let pr = r
+      let pg = g
+      let pb = b
+
+      if (alpha > 185 && microGrain < -0.52 && palette.dryStreakChance > 0.2) {
+        alpha = Math.round(alpha * (1 - palette.dryStreakChance * 0.42))
+      } else if (alpha > 195 && microGrain > 0.62) {
+        pr = Math.round(r * 0.62 + palette.poolRgb[0] * 0.38)
+        pg = Math.round(g * 0.62 + palette.poolRgb[1] * 0.38)
+        pb = Math.round(b * 0.62 + palette.poolRgb[2] * 0.38)
+        alpha = Math.min(255, Math.round(alpha * 1.08))
+      }
+
+      const dIdx = (y * cW + x) * 4
+      dData[dIdx] = pr
+      dData[dIdx + 1] = pg
+      dData[dIdx + 2] = pb
+      dData[dIdx + 3] = Math.min(255, Math.round(alpha))
     }
   }
 
-  // SURGERY 3: Subtle entry & exit flicks
-  if (desc.hasEntryHook) {
-    const startX = anchorX - 4.0
-    const startY = baselineY - baseFontSizePx * 0.15 + desc.entryHookDy
-    const endX = anchorX + 2.8
-    const endY = baselineY - baseFontSizePx * 0.22
-    drawBallpointStroke(
-      ctxA,
-      startX,
-      startY,
-      (startX + endX) * 0.5,
-      endY + 1.5,
-      endX,
-      endY,
-      strokeThick * 0.65,
-      palette,
-      0.15
-    )
-  }
+  dstCtx.putImageData(dstImg, 0, 0)
 
-  if (desc.hasExitFlick) {
-    const startX = anchorX + rawAdvance * 0.84
-    const startY = baselineY - baseFontSizePx * 0.11
-    const endX = startX + desc.exitFlickLength * (baseFontSizePx / 48)
-    const endY =
-      startY +
-      desc.exitFlickLength * desc.exitFlickSlope * (baseFontSizePx / 48)
-    drawBallpointStroke(
-      ctxA,
-      startX,
-      startY,
-      (startX + endX) * 0.5,
-      startY + 1.5,
-      endX,
-      endY,
-      strokeThick * 0.68,
-      palette,
-      0.15
-    )
-  }
-
-  // PASS 1: 1px Sub-pixel Smooth Horizontal Scanline Warp (scratchA -> scratchB)
-  const normScaleY = baseFontSizePx * 0.7
-  for (let sy = 0; sy < H; sy += 1) {
-    const u = (sy - (baselineY - baseFontSizePx * 0.25)) / normScaleY
-    let dx = -u * desc.slantShear * (baseFontSizePx * 0.35)
-
-    if (u < 0) {
-      dx += desc.topBendPx * u * u * (baseFontSizePx / 48)
-    } else {
-      dx += desc.descenderSweepPx * u * u * (baseFontSizePx / 48)
+  let minInkX = cW
+  let maxInkX = 0
+  for (let y = 0; y < cH; y++) {
+    for (let x = 0; x < cW; x++) {
+      if (dData[(y * cW + x) * 4 + 3] > 28) {
+        if (x < minInkX) minInkX = x
+        if (x > maxInkX) maxInkX = x
+      }
     }
-    dx +=
-      desc.bellyShiftPx *
-      Math.exp(-u * u * 2.2) *
-      (baseFontSizePx / 48)
-
-    const localScaleX =
-      1 +
-      (u < 0
-        ? Math.min(0.16, Math.max(-0.15, -u * desc.topFlareX))
-        : Math.min(0.16, Math.max(-0.15, u * desc.bottomPinchX)))
-
-    const destW = W * localScaleX
-    const destX = anchorX * (1 - localScaleX) + dx
-
-    ctxB.drawImage(canvasA, 0, sy, W, 1, destX, sy, destW, 1)
   }
 
-  // PASS 2: 1px Sub-pixel Smooth Vertical Column Warp (scratchB -> outCanvas)
-  const outCanvas = document.createElement('canvas')
-  outCanvas.width = W
-  outCanvas.height = H
-  const outCtx = outCanvas.getContext('2d')!
+  let effectiveAdvance = rawAdvance * desc.aspectScaleX * style.kerningTightness
+  let effectiveAnchorX = anchorX
 
-  const glyphCenterX = anchorX + rawAdvance * 0.5
-  const normScaleX = Math.max(18, rawAdvance * 0.75)
-
-  for (let sx = 0; sx < W; sx += 1) {
-    const vNorm = Math.max(-1.4, Math.min(1.4, (sx - glyphCenterX) / normScaleX))
-
-    const dy =
-      (desc.internalSlopePx * vNorm +
-        desc.archBowPx * Math.cos(vNorm * Math.PI * 0.75) +
-        desc.sWavePx * Math.sin(vNorm * Math.PI)) *
-      (baseFontSizePx / 48)
-
-    const localScaleY = Math.max(
-      0.84,
-      Math.min(1.18, 1 + desc.rightTaperY * vNorm * 0.55)
+  if (maxInkX > minInkX) {
+    const measuredSpan = maxInkX - minInkX + 1
+    effectiveAnchorX = Math.max(0, minInkX - 1)
+    const minCharAdvance =
+      /^[iIl1.,!':;|]$/.test(char)
+        ? quantizedSize * 0.18
+        : quantizedSize * 0.26
+    effectiveAdvance = Math.max(
+      minCharAdvance,
+      measuredSpan * style.kerningTightness
     )
-    const destH = H * localScaleY
-    const destY = baselineY * (1 - localScaleY) + dy
-
-    outCtx.drawImage(canvasB, sx, 0, 1, H, sx, destY, 1, destH)
   }
 
-  const cached: CachedAllographGlyph = {
-    canvas: outCanvas,
-    advanceWidth: rawAdvance,
-    anchorX,
-    baselineY,
+  const result: SynthesizedAllograph = {
+    canvas: dstCanvas,
     descriptor: desc,
+    advanceWidth: effectiveAdvance,
+    baselineY,
+    anchorX: effectiveAnchorX,
   }
 
-  glyphCache.set(cacheKey, cached)
-  return cached
+  allographCache.set(cacheKey, result)
+  return result
 }
 
-export class AllographScheduler {
-  private recentByChar = new Map<string, number[]>()
+export class AllographSequenceSelector {
+  private historyByChar = new Map<string, number[]>()
   private stepCounter = 0
   private seed: number
 
@@ -726,36 +530,32 @@ export class AllographScheduler {
     this.seed = seed
   }
 
-  nextVariant(char: string, wordPosition: 'initial' | 'medial' | 'final' | 'single'): number {
+  public nextVariant(char: string): number {
     this.stepCounter++
-    const recent = this.recentByChar.get(char) ?? []
-    const code = char.charCodeAt(0)
+    const history = this.historyByChar.get(char) || []
 
-    const posBias =
-      wordPosition === 'initial'
-        ? 0
-        : wordPosition === 'final'
-          ? 7
-          : wordPosition === 'single'
-            ? 13
-            : 3
+    let bestCandidate = 0
+    let bestScore = -1
 
-    let candidate =
-      Math.floor(
-        hashPair(code + this.seed, this.stepCounter, posBias) * 20
-      ) % 20
-
-    let attempts = 0
-    while (recent.includes(candidate) && attempts < 20) {
-      candidate = (candidate + 3 + (attempts % 5)) % 20
-      attempts++
+    for (let candidate = 0; candidate < 20; candidate++) {
+      if (history.includes(candidate)) continue
+      const pseudo = hashCharVariant(
+        char,
+        candidate,
+        this.seed + this.stepCounter * 7919
+      )
+      if (pseudo > bestScore) {
+        bestScore = pseudo
+        bestCandidate = candidate
+      }
     }
 
-    recent.push(candidate)
-    if (recent.length > 10) {
-      recent.shift()
+    history.push(bestCandidate)
+    if (history.length > 12) {
+      history.shift()
     }
-    this.recentByChar.set(char, recent)
-    return candidate
+    this.historyByChar.set(char, history)
+
+    return bestCandidate
   }
 }
