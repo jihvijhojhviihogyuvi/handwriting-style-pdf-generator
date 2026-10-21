@@ -1,0 +1,95 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: var(--font-sans), 'Space Grotesk', sans-serif;
+  --font-mono: var(--font-mono), 'IBM Plex Mono', monospace;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+:root,
+.dark {
+  color-scheme: dark;
+  --background: #0f1115;
+  --foreground: #f3f4f6;
+  --card: #161920;
+  --card-foreground: #f3f4f6;
+  --popover: #181c24;
+  --popover-foreground: #f3f4f6;
+  --primary: #e09f3e;
+  --primary-foreground: #0f1115;
+  --secondary: #222631;
+  --secondary-foreground: #e5e7eb;
+  --muted: #1e222b;
+  --muted-foreground: #9ca3af;
+  --accent: #2563eb;
+  --accent-foreground: #f9fafb;
+  --destructive: #ef4444;
+  --border: #282d3a;
+  --input: #222733;
+  --ring: #e09f3e;
+  --radius: 0.5rem;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Print stylesheet so native browser print outputs ONLY the high-DPI handwritten pages */
+@media print {
+  @page {
+    size: letter portrait;
+    margin: 0;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only-pages {
+    display: block !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .print-page-canvas {
+    width: 100vw !important;
+    height: 100vh !important;
+    page-break-after: always;
+    break-after: page;
+    display: block !important;
+  }
+}
