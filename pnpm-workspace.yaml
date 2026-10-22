@@ -1,8 +1,2 @@
-pmOnFail: ignore
-
-minimumReleaseAgeExclude:
-  - '@next/*'
-  - next
-
 allowBuilds:
-  core-js: set this to true or false
+  core-js: true
