@@ -1,33 +1,45 @@
-# handwriting-style-pdf-generator
+# Chirograph
 
-This is a [Next.js](https://nextjs.org) project bootstrapped with [v0](https://v0.app).
+A previewable handwriting-style PDF generator built with Next.js and Canvas.
 
-## Built with v0
+## Features
 
-This repository is linked to a [v0](https://v0.app) project. You can continue developing by visiting the link below -- start new chats to make changes, and v0 will push commits directly to this repo. Every merge to `main` will automatically deploy.
+- Generate realistic handwritten pages from editable text
+- Multiple handwriting styles and pen ink colors
+- Adjustable writing size, nib thinness, spacing, drift, height variation, and margin wander
+- Paper textures, ruled pages, and forensic guide overlays
+- Letter-variant specimen inspection
+- Zoomable preview with PDF export and print support
 
-[Continue working on v0 →](https://v0.app/chat/projects/prj_iPCufTtSFt7yrERfKcEQmTiImIuz)
+## Preview
 
-## Getting Started
-
-First, run the development server:
+Run the development server and open the local preview:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then visit `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Build
 
-## Learn More
+```bash
+pnpm build
+pnpm start
+```
 
-To learn more, take a look at the following resources:
+## Project Structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-- [v0 Documentation](https://v0.app/docs) - learn about v0 and how to use it.
+- `app/` — Next.js App Router entry points and global styles
+- `components/handwriting-studio.tsx` — interactive studio UI
+- `lib/allograph-engine.ts` — handwriting glyph and stroke synthesis
+- `lib/page-compositor.ts` — page layout and Canvas composition
+- `lib/mistake-generator.ts` — correction and handwriting artifact generation
+
+## Usage
+
+1. Enter or edit text in the workbench.
+2. Choose a handwriting profile, ink color, and paper style.
+3. Tune the controls for size, nib thinness, spacing, and natural variation.
+4. Review the generated page in the preview.
+5. Export or print the result when it is ready.
