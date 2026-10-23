@@ -91,7 +91,7 @@ export function HandwritingStudio() {
   const [handStyle, setHandStyle] = useState<HandStyleId>('everyday-ballpoint')
   const [inkColor, setInkColor] = useState<InkColorId>('bic-blue')
   const [paperStyle, setPaperStyle] = useState<PaperStyleId>('natural-bond')
-  const [fontSizePx, setFontSizePx] = useState<number>(42)
+  const [fontSizePx, setFontSizePx] = useState<number>(60)
   const [nibFineness, setNibFineness] = useState<number>(1.05)
   const [diagonalDriftIntensity, setDiagonalDriftIntensity] = useState<number>(1.15)
   const [unevenHeightIntensity, setUnevenHeightIntensity] = useState<number>(1.2)
@@ -534,7 +534,7 @@ export function HandwritingStudio() {
                   setUnevenHeightIntensity(1.3)
                   setMistakeFrequency(0.08)
                   setMarginWanderIntensity(1.15)
-                  setFontSizePx(48)
+                  setFontSizePx(60)
                 }}
                 className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
               >
@@ -662,7 +662,7 @@ export function HandwritingStudio() {
                   <input
                     type="range"
                     min={34}
-                    max={60}
+                    max={80}
                     step={2}
                     value={fontSizePx}
                     onChange={(e) => {
