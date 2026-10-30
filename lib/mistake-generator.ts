@@ -6,7 +6,7 @@
  * multi-pass ballpoint scratch-out physics styles over the mistaken handwritten glyphs.
  */
 
-import { InkPalette } from './allograph-engine'
+import type { InkPalette } from './allograph-engine'
 
 export type ScratchStyle =
   | 'dense-zigzag'

@@ -12,20 +12,19 @@
 
 import {
   AllographSequenceSelector,
+  estimateTextAdvanceWidth,
   getOrSynthesizeAllograph,
   HAND_STYLES,
-  HandStyleId,
   INK_PALETTES,
-  InkColorId,
 } from './allograph-engine'
+import type { HandStyleId, InkColorId } from './allograph-engine'
 import {
-  GeneratedMistake,
   pickScratchStyle,
   renderHandwrittenCaret,
   renderScratchOutOverlay,
-  ScratchStyle,
   synthesizeMistakenText,
 } from './mistake-generator'
+import type { GeneratedMistake, ScratchStyle } from './mistake-generator'
 
 export type PaperStyleId =
   | 'natural-bond'
@@ -44,6 +43,7 @@ export interface CompositorConfig {
   unevenHeightIntensity: number // 0.0 .. 2.0
   mistakeFrequency: number // 0.0 .. 0.25
   marginWanderIntensity: number // 0.0 .. 2.0
+  lineSpacing?: number // baseline pitch as a multiple of fontSizePx (default 1.72)
   seed: number
   showForensicGuides: boolean
 }
@@ -60,7 +60,7 @@ export interface CompositorTelemetry {
   maxCharHeightRatio: number
 }
 
-interface WordToken {
+export interface WordToken {
   raw: string
   isExplicitMistake: boolean
   isAutoMistake: boolean
@@ -70,6 +70,8 @@ interface WordToken {
   sentenceIndex: number
   wordIndexInSentence: number
   isParagraphBreak?: boolean
+  /** For break tokens: how many baseline steps the next line drops (1 = line break). */
+  gapLines?: number
 }
 
 const NATURAL_LIGATURE_BIGRAMS = new Set([
@@ -85,12 +87,27 @@ function seededRand(seed: number): number {
   return x - Math.floor(x)
 }
 
-function tokenizeInputWithMistakes(
+/**
+ * Matches a word the author explicitly wrapped in tildes, tolerating the punctuation
+ * that authors naturally type around a word: `~forgt~`, `~forgt~,`, `(~forgt~)` and
+ * `~~forgt~~` all resolve to the same crossed-out token.
+ */
+const EXPLICIT_MISTAKE_RE =
+  /^([("'[\u201c«]*)(?:~~|~)([^~\s]+)(?:~~|~)([)"'\]\u201d».,;:!?]*)$/
+
+export function parseExplicitMistake(word: string): string | null {
+  const match = word.match(EXPLICIT_MISTAKE_RE)
+  if (!match) return null
+  const inner = `${match[1]}${match[2]}${match[3]}`.trim()
+  return inner.length > 0 ? inner : null
+}
+
+export function tokenizeInputWithMistakes(
   text: string,
   mistakeFrequency: number,
   seed: number
 ): { tokens: WordToken[]; mistakes: GeneratedMistake[] } {
-  const paragraphs = text.replace(/\r\n/g, '\n').split('\n')
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
   const tokens: WordToken[] = []
   const mistakes: GeneratedMistake[] = []
 
@@ -100,9 +117,21 @@ function tokenizeInputWithMistakes(
   let lastScratch: ScratchStyle | undefined
   let lastAutoMistakeWordIdx = -10
 
-  for (let pIdx = 0; pIdx < paragraphs.length; pIdx++) {
-    const para = paragraphs[pIdx]
-    if (pIdx > 0) {
+  // A blank line is *one* paragraph gap, not one gap per newline character. Counting
+  // newlines directly used to emit two break tokens for "para one\n\npara two", which
+  // doubled the visual gap and could spuriously trigger a page break.
+  let blankLinesSinceLastContent = 0
+  let hasContent = false
+
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const rawWords = lines[lineIdx].split(/\s+/).filter((w) => w.length > 0)
+
+    if (rawWords.length === 0) {
+      if (hasContent) blankLinesSinceLastContent++
+      continue
+    }
+
+    if (hasContent) {
       tokens.push({
         raw: '',
         isExplicitMistake: false,
@@ -110,18 +139,18 @@ function tokenizeInputWithMistakes(
         sentenceIndex,
         wordIndexInSentence: wordInSentence,
         isParagraphBreak: true,
+        gapLines: Math.min(3, 1 + blankLinesSinceLastContent),
       })
     }
-
-    const rawWords = para.split(/\s+/).filter((w) => w.length > 0)
+    blankLinesSinceLastContent = 0
+    hasContent = true
     for (let wIdx = 0; wIdx < rawWords.length; wIdx++) {
       const word = rawWords[wIdx]
       globalWordCounter++
 
-      const explicitMatch =
-        word.match(/^~(.+)~$/) || word.match(/^~~(.+)~~$/)
-      if (explicitMatch && explicitMatch[1].length > 0) {
-        const inner = explicitMatch[1]
+      const explicitMistakeText = parseExplicitMistake(word)
+      if (explicitMistakeText) {
+        const inner = explicitMistakeText
         const style = pickScratchStyle(
           seed + globalWordCounter * 37,
           lastScratch
@@ -152,8 +181,8 @@ function tokenizeInputWithMistakes(
       const rMistake = seededRand(seed + globalWordCounter * 113)
       const nextRaw = rawWords[wIdx + 1] || ''
       const prevWasExplicit =
-        wIdx > 0 && /^~.+~$/.test(rawWords[wIdx - 1])
-      const nextIsExplicit = /^~.+~$/.test(nextRaw)
+        wIdx > 0 && parseExplicitMistake(rawWords[wIdx - 1]) !== null
+      const nextIsExplicit = parseExplicitMistake(nextRaw) !== null
 
       if (
         mistakeFrequency > 0 &&
@@ -215,13 +244,21 @@ function tokenizeInputWithMistakes(
   return { tokens, mistakes }
 }
 
+interface PaperGrid {
+  topStart: number
+  lineSpacing: number
+  marginLineX: number
+  bottomLimit: number
+}
+
 function drawPaperSurface(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
   paperStyle: PaperStyleId,
   pageIndex: number,
-  seed: number
+  seed: number,
+  grid: PaperGrid
 ) {
   ctx.save()
 
@@ -274,27 +311,32 @@ function drawPaperSurface(
   }
 
   if (paperStyle === 'college-ruled' || paperStyle === 'legal-pad') {
-    const topMargin = height * 0.085
-    const lineSpacing = height * 0.031
+    // Rules are drawn on the exact baseline pitch the compositor writes on, so the
+    // handwriting genuinely "sits on the lines" instead of floating between them.
+    const lineSpacing = Math.max(24, grid.lineSpacing)
+    const topMargin = grid.topStart
     ctx.strokeStyle =
       paperStyle === 'legal-pad'
         ? 'rgba(135, 175, 210, 0.40)'
         : 'rgba(145, 182, 228, 0.36)'
     ctx.lineWidth = 1.15
 
-    for (let y = topMargin; y < height - height * 0.05; y += lineSpacing) {
+    for (
+      let y = topMargin;
+      y < Math.min(height - height * 0.035, grid.bottomLimit + lineSpacing);
+      y += lineSpacing
+    ) {
       ctx.beginPath()
       ctx.moveTo(0, y)
       ctx.lineTo(width, y)
       ctx.stroke()
     }
 
-    const marginX = width * 0.105
     ctx.strokeStyle = 'rgba(218, 108, 108, 0.40)'
     ctx.lineWidth = 1.4
     ctx.beginPath()
-    ctx.moveTo(marginX, 0)
-    ctx.lineTo(marginX, height)
+    ctx.moveTo(grid.marginLineX, 0)
+    ctx.lineTo(grid.marginLineX, height)
     ctx.stroke()
   }
 
@@ -358,6 +400,21 @@ export function renderHandwrittenDocument(
     return kin
   }
 
+  const isRuledPaper =
+    config.paperStyle === 'college-ruled' || config.paperStyle === 'legal-pad'
+  const baseLeftMargin = isRuledPaper ? pageWidth * 0.122 : pageWidth * 0.085
+  const baseRightMargin = pageWidth * 0.922
+  const topStart = pageHeight * 0.095
+  const bottomLimit = pageHeight * 0.92
+  const baseLineSpacing = config.fontSizePx * (config.lineSpacing ?? 1.72)
+
+  const paperGrid: PaperGrid = {
+    topStart,
+    lineSpacing: baseLineSpacing,
+    marginLineX: baseLeftMargin - pageWidth * 0.016,
+    bottomLimit,
+  }
+
   const ensurePage = (idx: number): HTMLCanvasElement => {
     while (canvases.length <= idx) {
       const c = document.createElement('canvas')
@@ -377,7 +434,8 @@ export function renderHandwrittenDocument(
       pageHeight,
       config.paperStyle,
       idx,
-      config.seed
+      config.seed,
+      paperGrid
     )
     return pageCanvas
   }
@@ -385,15 +443,6 @@ export function renderHandwrittenDocument(
   let currentPageIdx = 0
   let currentCanvas = ensurePage(0)
   let ctx = currentCanvas.getContext('2d')!
-
-  const baseLeftMargin =
-    config.paperStyle === 'college-ruled' || config.paperStyle === 'legal-pad'
-      ? pageWidth * 0.122
-      : pageWidth * 0.085
-  const baseRightMargin = pageWidth * 0.922
-  const topStart = pageHeight * 0.095
-  const bottomLimit = pageHeight * 0.92
-  const baseLineSpacing = config.fontSizePx * 1.72
 
   let lineNumberOnPage = 0
   let cursorY = topStart
@@ -439,8 +488,34 @@ export function renderHandwrittenDocument(
   let minHeightSeen = 1.0
   let maxHeightSeen = 1.0
 
-  const startNewLine = (extraGapMultiplier = 1.0) => {
-    lineNumberOnPage++
+  const resetLineCursor = () => {
+    currentMargins = getLineMargins(lineNumberOnPage)
+    cursorX = currentMargins.left
+    lineStartOriginX = cursorX
+    currentLineDriftY = 0
+  }
+
+  const startNewPage = () => {
+    currentPageIdx++
+    currentCanvas = ensurePage(currentPageIdx)
+    ctx = currentCanvas.getContext('2d')!
+    lineNumberOnPage = 0
+    cursorY = topStart + (seededRand(config.seed + currentPageIdx * 17) - 0.5) * 6
+    prevLineActualYProfile = null
+    resetLineCursor()
+  }
+
+  /** Drops the current line if the rest of the page cannot hold a couple of lines. */
+  const pageHasRoomFor = (lineCount: number) =>
+    bottomLimit - cursorY >= baseLineSpacing * lineCount
+
+  /**
+   * Moves to the next baseline. `linesToAdvance` is 1 for an ordinary line break and
+   * larger when the author left blank lines between paragraphs.
+   */
+  const startNewLine = (linesToAdvance = 1) => {
+    const advance = Math.max(1, Math.min(3, Math.round(linesToAdvance)))
+    lineNumberOnPage += advance
     const rGap = seededRand(
       config.seed + currentPageIdx * 313 + lineNumberOnPage * 89
     )
@@ -450,7 +525,19 @@ export function renderHandwrittenDocument(
       0.28 *
       (0.5 + config.diagonalDriftIntensity * 0.5)
 
-    let minAllowedY = cursorY + baseLineSpacing * extraGapMultiplier + gapJitter
+    let minAllowedY: number
+    if (isRuledPaper) {
+      // On lined paper the writer follows the printed rules: each baseline lands on
+      // the next rule (blank lines skip a rule) with only a millimetre of wobble.
+      minAllowedY =
+        topStart +
+        lineNumberOnPage * baseLineSpacing +
+        (rGap - 0.5) * Math.min(5, config.fontSizePx * 0.075)
+    } else {
+      const gapMultiplier = advance === 1 ? 1.12 : 1.62 + (advance - 2) * 0.45
+      minAllowedY = cursorY + baseLineSpacing * gapMultiplier + gapJitter
+    }
+
     if (prevLineActualYProfile !== null) {
       let maxPrevLineY = 0
       for (let i = 0; i < prevLineActualYProfile.length; i++) {
@@ -469,20 +556,11 @@ export function renderHandwrittenDocument(
     cursorY = minAllowedY
 
     if (cursorY > bottomLimit) {
-      currentPageIdx++
-      currentCanvas = ensurePage(currentPageIdx)
-      ctx = currentCanvas.getContext('2d')!
-      lineNumberOnPage = 0
-      cursorY =
-        topStart +
-        (seededRand(config.seed + currentPageIdx * 17) - 0.5) * 16
-      prevLineActualYProfile = null
+      startNewPage()
+      return
     }
 
-    currentMargins = getLineMargins(lineNumberOnPage)
-    cursorX = currentMargins.left
-    lineStartOriginX = cursorX
-    currentLineDriftY = 0
+    resetLineCursor()
   }
 
   const renderWordUnit = (
@@ -674,8 +752,34 @@ export function renderHandwrittenDocument(
     }
   }
 
+  /**
+   * Style-aware advance estimate, calibrated while the page is being written.
+   *
+   * `estimateTextAdvanceWidth` uses the font's own metrics, but the compositor draws
+   * glyphs by their *optical* x-height body span, which is consistently narrower
+   * (Caveat, for instance, is a condensed face). Left uncalibrated, every line wrapped
+   * ~30% early and the right margin looked ragged. The running ratio between estimated
+   * and actually drawn widths fixes that for any font without hardcoding a constant.
+   */
+  let estimateScale = 1
+  let estimateSamples = 0
   const estimateWordWidth = (wordStr: string) =>
-    wordStr.length * config.fontSizePx * 0.44
+    estimateTextAdvanceWidth(wordStr, config.handStyle, config.fontSizePx) *
+    1.03 *
+    estimateScale
+
+  const calibrateEstimate = (estimated: number, actual: number, wordLength: number) => {
+    // Very short words produce noisy ratios; learn from ordinary words only.
+    if (estimated <= 0 || actual <= 0 || wordLength < 3) return
+    const observed = actual / estimated
+    if (!Number.isFinite(observed)) return
+    // Converge quickly over the first line, then track slowly so a single unusually
+    // wide or narrow word cannot skew the margin for the rest of the page.
+    const weight = estimateSamples < 8 ? 0.35 : 0.1
+    const next = estimateScale * (1 - weight) + observed * weight
+    estimateScale = Math.min(1.15, Math.max(0.55, next))
+    estimateSamples++
+  }
 
   let currentLineYProfile = new Float32Array(pageWidth)
 
@@ -685,13 +789,20 @@ export function renderHandwrittenDocument(
     if (token.isParagraphBreak) {
       prevLineActualYProfile = currentLineYProfile
       currentLineYProfile = new Float32Array(pageWidth)
-      startNewLine(1.36)
+      const gapLines = token.gapLines ?? 2
+      // Widow/orphan control: never strand the opening words of a paragraph at the
+      // very bottom of a page — start the paragraph on a fresh sheet instead.
+      if (cursorY > topStart + baseLineSpacing && !pageHasRoomFor(gapLines + 0.4)) {
+        startNewPage()
+      } else {
+        startNewLine(gapLines)
+      }
       continue
     }
 
     const sKin = getSentenceKinematics(token.sentenceIndex)
 
-    const calcActiveY = (atX: number) => {
+    const calcActiveY = (atX: number, allowOverflowBreak = true): number => {
       const clampedDrift = Math.max(-26, Math.min(30, currentLineDriftY))
       let yVal = cursorY + clampedDrift
 
@@ -707,6 +818,20 @@ export function renderHandwrittenDocument(
           cursorY += pushDown
           yVal += pushDown
         }
+      }
+
+      // A tall ascender or a collision push-down can shove a line past the bottom
+      // margin. Previously that silently wrote into the page's bottom edge; now the
+      // line is broken first (carrying the rest of the text onto the next page).
+      if (
+        allowOverflowBreak &&
+        yVal > bottomLimit - config.fontSizePx * 0.12 &&
+        cursorX > currentMargins.left + 20
+      ) {
+        prevLineActualYProfile = currentLineYProfile
+        currentLineYProfile = new Float32Array(pageWidth)
+        startNewLine(1.0)
+        return calcActiveY(cursorX, false)
       }
 
       return Math.max(72, Math.min(pageHeight - 72, yVal))
@@ -755,6 +880,7 @@ export function renderHandwrittenDocument(
         token.sentenceIndex,
         tIdx * 19 + 3
       )
+      calibrateEstimate(estW, rendered.width, token.mistakenText.length)
 
       renderScratchOutOverlay(
         ctx,
@@ -894,6 +1020,7 @@ export function renderHandwrittenDocument(
       token.sentenceIndex,
       tIdx * 37 + 17
     )
+    calibrateEstimate(estW, rendered.width, token.raw.length)
 
     recordSpanInLineProfile(
       cursorX,

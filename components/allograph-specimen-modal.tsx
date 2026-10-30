@@ -27,6 +27,41 @@ export function AllographSpecimenModal({
 }: AllographSpecimenModalProps) {
   const [selectedChar, setSelectedChar] = useState<string>('e')
   const gridCanvasesRef = useRef<(HTMLCanvasElement | null)[]>([])
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null)
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null)
+  // Kept in a ref so an inline `onClose` prop cannot re-run (and re-steal focus in)
+  // this effect on every parent render.
+  const onCloseRef = useRef(onClose)
+
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
+
+  // Escape closes the inspector, background scrolling is locked while it is open,
+  // and focus returns to whatever opened it afterwards.
+  useEffect(() => {
+    if (!isOpen) return
+
+    previouslyFocusedRef.current = document.activeElement as HTMLElement | null
+    closeButtonRef.current?.focus()
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onCloseRef.current()
+      }
+    }
+
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', onKeyDown)
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+      previouslyFocusedRef.current?.focus?.()
+    }
+  }, [isOpen])
 
   useEffect(() => {
     if (!isOpen) return
@@ -103,17 +138,24 @@ export function AllographSpecimenModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm no-print"
       role="dialog"
       aria-modal="true"
-      aria-label="20-Allograph Character Specimen Matrix"
+      aria-labelledby="specimen-modal-title"
+      onClick={onClose}
     >
-      <div className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl">
+      <div
+        className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
         {/* Modal Header */}
         <div className="flex items-center justify-between border-b border-border bg-secondary/40 px-5 py-3.5">
           <div className="flex items-center gap-3">
             <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/15 text-primary">
-              <Fingerprint className="h-4 w-4" />
+              <Fingerprint className="h-4 w-4" aria-hidden="true" />
             </div>
             <div>
-              <h2 className="text-sm font-semibold tracking-wide text-foreground">
+              <h2
+                id="specimen-modal-title"
+                className="text-sm font-semibold tracking-wide text-foreground"
+              >
                 20× ALLOGRAPH SPECIMEN MATRIX // CHARACTER &lsquo;{selectedChar}&rsquo;
               </h2>
               <p className="text-xs text-muted-foreground">
@@ -126,9 +168,11 @@ export function AllographSpecimenModal({
             </div>
           </div>
           <button
+            ref={closeButtonRef}
+            type="button"
             onClick={onClose}
-            className="rounded-lg border border-border bg-secondary/60 p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-            aria-label="Close specimen matrix"
+            className="rounded-lg border border-border bg-secondary/60 p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+            aria-label="Close specimen matrix (Escape)"
           >
             <X className="h-4 w-4" />
           </button>
@@ -142,7 +186,10 @@ export function AllographSpecimenModal({
             </span>
             {LOWERCASE_LETTERS.map((ch) => (
               <button
-                key={ch}
+                key={`lower-${ch}`}
+                type="button"
+                aria-pressed={selectedChar === ch}
+                aria-label={`Inspect lowercase ${ch}`}
                 onClick={() => setSelectedChar(ch)}
                 className={`h-7 w-7 rounded font-mono text-xs font-medium transition-all ${
                   selectedChar === ch
@@ -160,7 +207,10 @@ export function AllographSpecimenModal({
             </span>
             {UPPERCASE_LETTERS.map((ch) => (
               <button
-                key={ch}
+                key={`upper-${ch}`}
+                type="button"
+                aria-pressed={selectedChar === ch}
+                aria-label={`Inspect capital ${ch}`}
                 onClick={() => setSelectedChar(ch)}
                 className={`h-7 w-7 rounded font-mono text-xs font-medium transition-all ${
                   selectedChar === ch
@@ -227,14 +277,15 @@ export function AllographSpecimenModal({
         {/* Footer Note */}
         <div className="flex items-center justify-between border-t border-border bg-secondary/40 px-5 py-3 text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
-            <Sparkles className="h-3.5 w-3.5 text-primary" />
+            <Sparkles className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
             <span>
               Anti-Repetition Scheduler ensures consecutive occurrences of &lsquo;{selectedChar}&rsquo; never reuse the same variant.
             </span>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="rounded-md bg-primary px-3.5 py-1.5 font-medium text-primary-foreground transition-opacity hover:opacity-90"
+            className="rounded-md bg-primary px-3.5 py-1.5 font-medium text-primary-foreground transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
           >
             Done Inspecting
           </button>

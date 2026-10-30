@@ -1,5 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Hides the framework banner from responses (small, free hardening).
+  poweredByHeader: false,
+  reactStrictMode: true,
   images: {
     unoptimized: true,
   },
@@ -19,6 +22,10 @@ const nextConfig = {
           {
             key: 'Strict-Transport-Security',
             value: 'max-age=63072000',
+          },
+          {
+            key: 'X-DNS-Prefetch-Control',
+            value: 'on',
           },
         ],
       },

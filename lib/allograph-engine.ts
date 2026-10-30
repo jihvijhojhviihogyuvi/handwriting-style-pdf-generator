@@ -342,10 +342,104 @@ export function getAllographDescriptor(
   }
 }
 
+/**
+ * Every handwriting family the studio is allowed to use.
+ * Kept in one place so the font pre-loader, the specimen modal, and the stylesheet
+ * can never drift out of sync.
+ */
+export const HANDWRITING_FONT_FAMILIES = [
+  'Caveat',
+  'Nanum Pen Script',
+  'Shadows Into Light Two',
+  'Kalam',
+  'Nothing You Could Do',
+  'Reenie Beanie',
+  'La Belle Aurore',
+  'Indie Flower',
+  'Homemade Apple',
+  'Cedarville Cursive',
+  'Dawning of a New Day',
+  'Give You Glory',
+  'Over the Rainbow',
+  'Sue Ellen Francisco',
+  'Waiting for the Sunrise',
+  'Zeyada',
+] as const
+
+/**
+ * Glyph bitmaps are expensive to synthesize (a full per-pixel morphological pass),
+ * so they are memoised. Each cached glyph is a ~200x220 RGBA canvas (~176 KB), which
+ * means an unbounded cache can easily reach gigabytes while a user drags the size or
+ * nib slider. Entries are evicted least-recently-used once the budget is exceeded.
+ */
+const ALLOGRAPH_CACHE_LIMIT = 900
 const allographCache = new Map<string, SynthesizedAllograph>()
+
+let measureCanvas: HTMLCanvasElement | null = null
+
+function getMeasureContext(): CanvasRenderingContext2D | null {
+  if (typeof document === 'undefined') return null
+  if (!measureCanvas) {
+    measureCanvas = document.createElement('canvas')
+    measureCanvas.width = 8
+    measureCanvas.height = 8
+  }
+  return measureCanvas.getContext('2d')
+}
+
+/**
+ * Fast, allocation-free estimate of the horizontal advance a word will occupy once
+ * it has been synthesized (including the inter-letter breathing gaps). Used by the
+ * compositor to decide where to wrap, so words never sail past the right margin.
+ */
+const NARROW_CHARS = new Set(['i', 'I', 'l', 'j', 'J', '1', '.', ',', ';', ':', "'", '|', '!'])
+const WIDE_CHARS = new Set(['m', 'w', 'M', 'W'])
+
+/**
+ * Fallback width model used when no canvas is available (server rendering, unit tests):
+ * a flat per-character constant under-measures "mmmm" and over-measures "iiii", which
+ * is exactly what makes words bleed past the margin on wide glyphs.
+ */
+function fallbackAdvanceWidth(text: string, fontSizePx: number): number {
+  let units = 0
+  for (const ch of text) {
+    units += WIDE_CHARS.has(ch) ? 0.85 : NARROW_CHARS.has(ch) ? 0.24 : 0.46
+  }
+  return units * fontSizePx
+}
+
+export function estimateTextAdvanceWidth(
+  text: string,
+  styleId: HandStyleId,
+  fontSizePx: number
+): number {
+  if (!text) return 0
+  const style = HAND_STYLES[styleId]
+  const fontPx = Math.max(8, Math.round(fontSizePx * style.fontScaleFactor))
+  const ctx = getMeasureContext()
+
+  const glyphAdvance = ctx
+    ? (() => {
+        ctx.font = `${style.fontWeight} ${fontPx}px ${style.fontFamily}, cursive`
+        return ctx.measureText(text).width
+      })()
+    : fallbackAdvanceWidth(text, fontPx)
+
+  const gapPerChar = Math.max(0.6, fontSizePx * (style.letterGapRatio + 0.012))
+  return glyphAdvance * 1.02 + gapPerChar * text.length
+}
 
 export function clearAllographCache() {
   allographCache.clear()
+}
+
+function rememberAllograph(key: string, value: SynthesizedAllograph) {
+  allographCache.set(key, value)
+  while (allographCache.size > ALLOGRAPH_CACHE_LIMIT) {
+    const oldestKey = allographCache.keys().next().value
+    if (oldestKey === undefined) break
+    allographCache.delete(oldestKey)
+  }
 }
 
 export function getOrSynthesizeAllograph(
@@ -362,7 +456,12 @@ export function getOrSynthesizeAllograph(
   const cacheKey = `${styleId}:${inkId}:${quantizedSize}:${finenessKey}:${char}:${v}`
 
   const existing = allographCache.get(cacheKey)
-  if (existing) return existing
+  if (existing) {
+    // Refresh recency so frequently reused letters are not evicted first.
+    allographCache.delete(cacheKey)
+    allographCache.set(cacheKey, existing)
+    return existing
+  }
 
   const desc = getAllographDescriptor(char, v, styleId)
   const style = HAND_STYLES[styleId]
@@ -626,7 +725,7 @@ export function getOrSynthesizeAllograph(
     anchorX: effectiveAnchorX,
   }
 
-  allographCache.set(cacheKey, result)
+  rememberAllograph(cacheKey, result)
   return result
 }
 
