@@ -1,5 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Hides the framework banner from responses (small, free hardening).
+  poweredByHeader: false,
+  reactStrictMode: true,
+  // Allows the sandbox preview proxy (and local tunnelling services) to load dev
+  // assets and the HMR socket when running `next dev` behind a different origin.
+  allowedDevOrigins: ['*.e2b.app', '*.e2b.dev', '*.ngrok-free.app', '*.serveo.net'],
   images: {
     unoptimized: true,
   },
@@ -19,6 +25,10 @@ const nextConfig = {
           {
             key: 'Strict-Transport-Security',
             value: 'max-age=63072000',
+          },
+          {
+            key: 'X-DNS-Prefetch-Control',
+            value: 'on',
           },
         ],
       },
